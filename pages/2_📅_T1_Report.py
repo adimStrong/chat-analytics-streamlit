@@ -127,9 +127,9 @@ cmt_reply = cmt_row[0] if cmt_row else 0
 # Response rate
 response_rate = (msg_sent / msg_recv * 100) if msg_recv > 0 else 0
 
-# Display summary cards
+# Display summary cards (removed New Conversations - same as Unique Users in FB Messenger)
 st.subheader("📈 Daily Summary")
-col1, col2, col3, col4, col5, col6 = st.columns(6)
+col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
     st.metric("📥 Messages Received", f"{msg_recv:,}")
@@ -138,11 +138,87 @@ with col2:
 with col3:
     st.metric("👥 Unique Users", f"{unique_users:,}")
 with col4:
-    st.metric("💬 New Conversations", f"{new_convos:,}")
-with col5:
     st.metric("📊 Response Rate", f"{response_rate:.1f}%")
-with col6:
+with col5:
     st.metric("↩️ Page Comments", f"{cmt_reply:,}")
+
+st.markdown("---")
+
+# ============================================
+# SMA MEMBER PERFORMANCE
+# ============================================
+st.subheader("👥 SMA Member Performance")
+
+cur.execute("""
+    SELECT 
+        a.agent_name as "Agent",
+        s.shift as "Shift",
+        s.schedule_status as "Status",
+        s.duty_hours as "Hours",
+        s.messages_received as "Msg Recv",
+        s.messages_sent as "Msg Sent",
+        s.comment_replies as "Comments",
+        CASE WHEN s.messages_received > 0 
+             THEN ROUND(100.0 * s.messages_sent / s.messages_received, 1)
+             ELSE 0 END as "Response %"
+    FROM agent_daily_stats s
+    JOIN agents a ON s.agent_id = a.id
+    WHERE s.date BETWEEN %s AND %s
+    ORDER BY 
+        CASE s.shift 
+            WHEN 'Morning' THEN 1 
+            WHEN 'Mid' THEN 2 
+            ELSE 3 
+        END,
+        a.agent_name
+""", (from_date, to_date))
+sma_data = cur.fetchall()
+
+if sma_data:
+    sma_df = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %'])
+    
+    # Color code by status
+    def style_status(val):
+        if val == 'present':
+            return 'background-color: #d1fae5; color: #065f46'  # green
+        elif val == 'absent':
+            return 'background-color: #fee2e2; color: #991b1b'  # red
+        elif val == 'off':
+            return 'background-color: #f3f4f6; color: #4b5563'  # gray
+        return ''
+    
+    sma_display = sma_df.copy()
+    for col in ['Msg Recv', 'Msg Sent', 'Comments']:
+        sma_display[col] = sma_display[col].apply(format_number)
+    sma_display['Response %'] = sma_display['Response %'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.dataframe(
+            sma_display.style.applymap(style_status, subset=['Status']),
+            hide_index=True,
+            use_container_width=True
+        )
+    
+    with col2:
+        # Summary by status
+        status_counts = sma_df['Status'].value_counts()
+        st.markdown("**📊 Attendance Summary**")
+        for status, count in status_counts.items():
+            emoji = "✅" if status == 'present' else "❌" if status == 'absent' else "⏸️" if status == 'off' else "❓"
+            st.markdown(f"{emoji} {status.title()}: **{count}**")
+        
+        # Total metrics for present agents
+        present_df = sma_df[sma_df['Status'] == 'present']
+        if not present_df.empty:
+            st.markdown("---")
+            st.markdown("**📈 Present Agents Total:**")
+            st.markdown(f"📥 Msg Recv: **{present_df['Msg Recv'].sum():,}**")
+            st.markdown(f"📤 Msg Sent: **{present_df['Msg Sent'].sum():,}**")
+            st.markdown(f"💬 Comments: **{present_df['Comments'].sum():,}**")
+else:
+    st.info("No SMA schedule data for selected date. Schedule may not be synced yet.")
 
 st.markdown("---")
 
@@ -308,8 +384,8 @@ else:
 # EXPORT FUNCTIONALITY (in sidebar)
 # ============================================
 export_data = {
-    'Metric': ['Messages Received', 'Messages Sent', 'Unique Users', 'New Conversations', 'Response Rate', 'Page Comments'],
-    'Value': [msg_recv, msg_sent, unique_users, new_convos, f"{response_rate:.1f}%", cmt_reply]
+    'Metric': ['Messages Received', 'Messages Sent', 'Unique Users', 'Response Rate', 'Page Comments'],
+    'Value': [msg_recv, msg_sent, unique_users, f"{response_rate:.1f}%", cmt_reply]
 }
 export_df = pd.DataFrame(export_data)
 
@@ -319,6 +395,14 @@ csv_buffer.write(f"Generated on: {today.strftime('%B %d, %Y')}\n\n")
 csv_buffer.write("SUMMARY\n")
 export_df.to_csv(csv_buffer, index=False)
 csv_buffer.write("\n")
+
+if sma_data:
+    csv_buffer.write("SMA MEMBER PERFORMANCE
+")
+    sma_export = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %'])
+    sma_export.to_csv(csv_buffer, index=False)
+    csv_buffer.write("
+")
 
 if shift_data:
     csv_buffer.write("BY SHIFT\n")
@@ -336,19 +420,136 @@ if hourly_data:
 
 csv_data = csv_buffer.getvalue()
 
-with st.sidebar:
-    filename = f"T1_Report_{from_date.strftime('%Y%m%d')}"
-    if use_date_range:
-        filename += f"_to_{to_date.strftime('%Y%m%d')}"
-    filename += ".csv"
+# Generate HTML report for PDF export
+def generate_html_report():
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>T+1 Daily Report - {date_label}</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; padding: 20px; max-width: 1000px; margin: 0 auto; }}
+        h1 {{ color: #1f2937; border-bottom: 2px solid #3B82F6; padding-bottom: 10px; }}
+        h2 {{ color: #374151; margin-top: 30px; }}
+        .header {{ background: linear-gradient(135deg, #3B82F6, #10B981); color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }}
+        .header h1 {{ color: white; border: none; margin: 0; }}
+        .summary-grid {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 15px; margin: 20px 0; }}
+        .metric-card {{ background: #f3f4f6; padding: 15px; border-radius: 8px; text-align: center; }}
+        .metric-value {{ font-size: 24px; font-weight: bold; color: #1f2937; }}
+        .metric-label {{ font-size: 12px; color: #6b7280; margin-top: 5px; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
+        th, td {{ border: 1px solid #e5e7eb; padding: 10px; text-align: left; }}
+        th {{ background: #f9fafb; font-weight: 600; }}
+        tr:nth-child(even) {{ background: #f9fafb; }}
+        .footer {{ margin-top: 30px; padding-top: 15px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; }}
+        @media print {{ body {{ padding: 10px; }} .header {{ background: #3B82F6 !important; -webkit-print-color-adjust: exact; }} }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 T+1 Daily Report</h1>
+        <p>Report Date: {date_label}</p>
+        <p>Generated: {today.strftime('%B %d, %Y')}</p>
+    </div>
+    
+    <h2>📈 Daily Summary</h2>
+    <div class="summary-grid">
+        <div class="metric-card">
+            <div class="metric-value">{msg_recv:,}</div>
+            <div class="metric-label">📥 Messages Received</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{msg_sent:,}</div>
+            <div class="metric-label">📤 Messages Sent</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{unique_users:,}</div>
+            <div class="metric-label">👥 Unique Users</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{response_rate:.1f}%</div>
+            <div class="metric-label">📊 Response Rate</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{cmt_reply:,}</div>
+            <div class="metric-label">↩️ Page Comments</div>
+        </div>
+    </div>
+"""
+    
+    # Add SMA Performance table
+    if sma_data:
+        html += """
+    <h2>👥 SMA Member Performance</h2>
+    <table>
+        <tr><th>Agent</th><th>Shift</th><th>Status</th><th>Hours</th><th>Msg Recv</th><th>Msg Sent</th><th>Comments</th><th>Response %</th></tr>
+"""
+        for row in sma_data:
+            status_style = 'background:#d1fae5' if row[2]=='present' else 'background:#fee2e2' if row[2]=='absent' else 'background:#f3f4f6'
+            resp_pct = f"{row[7]:.1f}%" if row[7] else "N/A"
+            html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td style='{status_style}'>{row[2]}</td><td>{row[3] or '-'}</td><td>{row[4]:,}</td><td>{row[5]:,}</td><td>{row[6]:,}</td><td>{resp_pct}</td></tr>
+"
+        html += "    </table>
+"
+    
+    # Add shift breakdown table
+    if shift_data:
+        html += """
+    <h2>🕐 Performance by Shift</h2>
+    <table>
+        <tr><th>Shift</th><th>Received</th><th>Sent</th><th>Unique Users</th><th>Response %</th></tr>
+"""
+        for row in shift_data:
+            resp_pct = f"{row[5]:.1f}%" if row[5] else "N/A"
+            html += f"        <tr><td>{row[0]}</td><td>{row[1]:,}</td><td>{row[2]:,}</td><td>{row[4]:,}</td><td>{resp_pct}</td></tr>
+"
+        html += "    </table>
+"
+    
+    # Add top pages table
+    if page_data:
+        html += """
+    <h2>📄 Top Pages Performance</h2>
+    <table>
+        <tr><th>Page</th><th>Received</th><th>Sent</th><th>Unique Users</th></tr>
+"""
+        for row in page_data:
+            html += f"        <tr><td>{row[0]}</td><td>{row[1]:,}</td><td>{row[2]:,}</td><td>{row[4]:,}</td></tr>
+"
+        html += "    </table>
+"
+    
+    html += """
+    <div class="footer">
+        <p><strong>How to save as PDF:</strong> Press Ctrl+P (or Cmd+P on Mac) → Select "Save as PDF" as destination</p>
+        <p>All times in Philippine Time (UTC+8) | Data from Facebook Graph API</p>
+    </div>
+</body>
+</html>"""
+    return html
 
+with st.sidebar:
+    filename_base = f"T1_Report_{from_date.strftime('%Y%m%d')}"
+    if use_date_range:
+        filename_base += f"_to_{to_date.strftime('%Y%m%d')}"
+
+    # HTML Export (for PDF)
+    html_report = generate_html_report()
     st.download_button(
-        label="📥 Download Summary CSV",
+        label="📄 Download Report (HTML/PDF)",
+        data=html_report,
+        file_name=f"{filename_base}.html",
+        mime="text/html",
+        help="Open in browser, then Print > Save as PDF"
+    )
+    
+    # CSV Export
+    st.download_button(
+        label="📥 Download Data (CSV)",
         data=csv_data,
-        file_name=filename,
+        file_name=f"{filename_base}.csv",
         mime="text/csv"
     )
-    st.caption("Export includes summary, shift breakdown, top pages, and hourly trend.")
+    st.caption("HTML: Open in browser → Print → Save as PDF")
 
 cur.close()
 
@@ -359,7 +560,6 @@ st.caption("""
 - **Messages Received**: Incoming messages from users
 - **Messages Sent**: Outgoing replies from page
 - **Unique Users**: Distinct users who sent messages
-- **New Conversations**: New conversation threads started
 - **Page Comments**: Comments posted by the page (replies to users)
 - **Response Rate**: Messages Sent / Messages Received x 100%
 """)
