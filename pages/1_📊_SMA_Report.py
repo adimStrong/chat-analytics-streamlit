@@ -369,7 +369,6 @@ def get_sma_summary(start_date, end_date):
             ads.shift as "Shift",
             SUM(ads.messages_received) as "Msg Recv",
             SUM(ads.messages_sent) as "Msg Sent",
-            SUM(ads.comments_received) as "Cmt Recv",
             SUM(ads.comment_replies) as "Cmt Reply",
             AVG(ads.avg_response_time_seconds) FILTER (WHERE ads.avg_response_time_seconds > 0) as "Avg RT (s)",
             COUNT(DISTINCT ads.date) FILTER (WHERE ads.schedule_status = 'present') as "Days Present",
@@ -384,7 +383,7 @@ def get_sma_summary(start_date, end_date):
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return pd.DataFrame(rows, columns=['SMA', 'Shift', 'Msg Recv', 'Msg Sent', 'Cmt Recv', 'Cmt Reply', 'Avg RT (s)', 'Days Present', 'Total Days'])
+    return pd.DataFrame(rows, columns=['SMA', 'Shift', 'Msg Recv', 'Msg Sent', 'Cmt Reply', 'Avg RT (s)', 'Days Present', 'Total Days'])
 
 @st.cache_data(ttl=60)
 def get_sma_session_stats(start_date, end_date):
@@ -556,7 +555,6 @@ def get_sma_daily_stats(start_date, end_date, agent_name=None):
                 ads.duty_hours,
                 ads.messages_received,
                 ads.messages_sent,
-                ads.comments_received,
                 ads.comment_replies,
                 ads.avg_response_time_seconds
             FROM agents a
@@ -575,7 +573,6 @@ def get_sma_daily_stats(start_date, end_date, agent_name=None):
                 ads.duty_hours,
                 ads.messages_received,
                 ads.messages_sent,
-                ads.comments_received,
                 ads.comment_replies,
                 ads.avg_response_time_seconds
             FROM agents a
@@ -588,7 +585,7 @@ def get_sma_daily_stats(start_date, end_date, agent_name=None):
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return pd.DataFrame(rows, columns=['SMA', 'Date', 'Shift', 'Status', 'Duty Hours', 'Msg Recv', 'Msg Sent', 'Cmt Recv', 'Cmt Reply', 'Avg RT (s)'])
+    return pd.DataFrame(rows, columns=['SMA', 'Date', 'Shift', 'Status', 'Duty Hours', 'Msg Recv', 'Msg Sent', 'Cmt Reply', 'Avg RT (s)'])
 
 @st.cache_data(ttl=60)
 def get_agent_list():
@@ -707,7 +704,6 @@ def get_sma_by_page_breakdown(start_date, end_date):
             COALESCE(ms.new_chats, 0) as "New Chats",
             COALESCE(ms.msg_recv, 0) as "Msg Recv",
             COALESCE(ms.msg_sent, 0) as "Msg Sent",
-            COALESCE(cs.cmt_recv, 0) as "Cmt Recv",
             COALESCE(cs.cmt_reply, 0) as "Cmt Reply",
             ss.avg_human_rt as "Avg Human RT (s)"
         FROM agent_pages ap
@@ -720,7 +716,7 @@ def get_sma_by_page_breakdown(start_date, end_date):
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return pd.DataFrame(rows, columns=['SMA', 'Page', 'Shift', 'New Chats', 'Msg Recv', 'Msg Sent', 'Cmt Recv', 'Cmt Reply', 'Avg Human RT (s)'])
+    return pd.DataFrame(rows, columns=['SMA', 'Page', 'Shift', 'New Chats', 'Msg Recv', 'Msg Sent', 'Cmt Reply', 'Avg Human RT (s)'])
 
 # ============================================
 # MAIN APP
@@ -864,7 +860,7 @@ with tab1:
                 barmode='group'
             )
             fig.update_layout(height=350)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig)
 
     with col2:
         if not comments_by_page.empty:
@@ -876,7 +872,7 @@ with tab1:
                 barmode='group'
             )
             fig.update_layout(height=350)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig)
 
 # ============================================
 # TAB 2: BY SHIFT BREAKDOWN
@@ -935,7 +931,7 @@ with tab2:
                 barmode='group',
                 height=350
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig)
 
     with col2:
         if not shift_stats.empty:
@@ -950,7 +946,7 @@ with tab2:
                 title='Unique Conversations by Shift',
                 height=350
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig)
 
     # Daily breakdown by shift
     st.markdown("---")
@@ -1016,7 +1012,7 @@ with tab3:
                 )
 
             # Format numeric columns with commas
-            for col in ['New Chats', 'Msg Recv', 'Msg Sent', 'Cmt Recv', 'Cmt Reply', 'Days Present', 'Total Days', 'Unique Users']:
+            for col in ['New Chats', 'Msg Recv', 'Msg Sent', 'Cmt Reply', 'Days Present', 'Total Days', 'Unique Users']:
                 if col in sma_display.columns:
                     sma_display[col] = sma_display[col].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "N/A")
 
@@ -1049,7 +1045,7 @@ with tab3:
             with col3:
                 st.metric("📤 Msg Sent", f"{sma_summary['Msg Sent'].sum():,}")
             with col4:
-                st.metric("💬 Cmt Recv", f"{sma_summary['Cmt Recv'].sum():,}")
+                pass  # Cmt Recv metric removed
             with col5:
                 st.metric("↩️ Cmt Reply", f"{sma_summary['Cmt Reply'].sum():,}")
             with col6:
@@ -1089,19 +1085,19 @@ with tab3:
                     color_discrete_map={'Msg Recv': '#3B82F6', 'Msg Sent': '#10B981'}
                 )
                 fig.update_layout(height=350)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig)
 
             with col2:
                 fig = px.bar(
                     sma_summary,
                     x='SMA',
-                    y=['Cmt Recv', 'Cmt Reply'],
+                    y=['Cmt Reply'],
                     title='Comments by Agent',
                     barmode='group',
-                    color_discrete_map={'Cmt Recv': '#8B5CF6', 'Cmt Reply': '#EC4899'}
+                    color_discrete_map={'Cmt Reply': '#EC4899'}
                 )
                 fig.update_layout(height=350)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig)
         else:
             st.info("No SMA data for selected period")
 
@@ -1115,7 +1111,7 @@ with tab3:
             # Format display
             sma_daily_display = sma_daily.copy()
             # Format numeric columns with commas
-            for col in ['Msg Recv', 'Msg Sent', 'Cmt Recv', 'Cmt Reply']:
+            for col in ['Msg Recv', 'Msg Sent', 'Cmt Reply']:
                 if col in sma_daily_display.columns:
                     sma_daily_display[col] = sma_daily_display[col].apply(format_number)
             sma_daily_display['Avg RT (s)'] = sma_daily_display['Avg RT (s)'].apply(
@@ -1147,7 +1143,7 @@ with tab3:
         if not sma_page_breakdown.empty:
             # Format response time and numeric columns
             sma_page_display = sma_page_breakdown.copy()
-            for col in ['New Chats', 'Msg Recv', 'Msg Sent', 'Cmt Recv', 'Cmt Reply']:
+            for col in ['New Chats', 'Msg Recv', 'Msg Sent', 'Cmt Reply']:
                 if col in sma_page_display.columns:
                     sma_page_display[col] = sma_page_display[col].apply(format_number)
             sma_page_display['Avg Human RT (s)'] = sma_page_display['Avg Human RT (s)'].apply(
@@ -1169,11 +1165,10 @@ with tab3:
                     'New Chats': 'sum',
                     'Msg Recv': 'sum',
                     'Msg Sent': 'sum',
-                    'Cmt Recv': 'sum',
-                    'Cmt Reply': 'sum'
+                                        'Cmt Reply': 'sum'
                 }).reset_index()
                 # Format with commas
-                for col in ['New Chats', 'Msg Recv', 'Msg Sent', 'Cmt Recv', 'Cmt Reply']:
+                for col in ['New Chats', 'Msg Recv', 'Msg Sent', 'Cmt Reply']:
                     page_summary[col] = page_summary[col].apply(format_number)
                 st.dataframe(page_summary, hide_index=True)
         else:
@@ -1253,7 +1248,7 @@ with tab5:
             yaxis_title='Count',
             height=400
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig)
 
         # Daily table
         st.markdown("**📋 Daily Breakdown**")
