@@ -619,6 +619,14 @@ elif view == "Monthly":
     filter_info.append(f"Date: **{start_date.strftime('%b %d, %Y')}** to **{end_date.strftime('%b %d, %Y')}**")
     st.info(" | ".join(filter_info))
 
+    # Data quality warning for comments
+    st.warning("""
+    ⚠️ **Comment Data Note (Aug-Nov 2025)**: Historical comment data for August through November 2025
+    is incomplete. These posts were fetched 2-4 months after publication, and the Facebook API
+    returns limited comments for older posts (~40 comments/post vs 300+ for recent posts).
+    December 2025 onwards shows accurate data. Messages are not affected.
+    """)
+
     messages_df, comments_df = get_monthly_data(selected_page, start_date, end_date)
 
     col1, col2 = st.columns(2)
