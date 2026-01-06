@@ -59,14 +59,11 @@ def get_pages():
 
 @st.cache_data(ttl=300)
 def get_date_range():
-    """Get min and max dates from data"""
+    """Get min and max dates from data - Comments start from Dec 7, 2025"""
     conn = get_connection()
     df = pd.read_sql("""
         SELECT
-            LEAST(
-                (SELECT MIN((message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date) FROM messages WHERE message_time >= '2025-06-01'),
-                (SELECT MIN((comment_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date) FROM comments WHERE comment_time >= '2025-06-01')
-            ) as min_date,
+            '2025-12-07'::date as min_date,
             GREATEST(
                 (SELECT MAX((message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date) FROM messages),
                 (SELECT MAX((comment_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date) FROM comments)
@@ -473,6 +470,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.caption("All times in Philippine Time (UTC+8)")
+    st.caption("📅 Data starts: December 7, 2025")
 
 
 # ============================================
@@ -619,13 +617,8 @@ elif view == "Monthly":
     filter_info.append(f"Date: **{start_date.strftime('%b %d, %Y')}** to **{end_date.strftime('%b %d, %Y')}**")
     st.info(" | ".join(filter_info))
 
-    # Data quality warning for comments
-    st.warning("""
-    ⚠️ **Comment Data Note (Aug-Nov 2025)**: Historical comment data for August through November 2025
-    is incomplete. These posts were fetched 2-4 months after publication, and the Facebook API
-    returns limited comments for older posts (~40 comments/post vs 300+ for recent posts).
-    December 2025 onwards shows accurate data. Messages are not affected.
-    """)
+    # Data quality note
+    st.info("📅 **Data available from December 7, 2025** - Comment data is accurate from this date onwards.")
 
     messages_df, comments_df = get_monthly_data(selected_page, start_date, end_date)
 
