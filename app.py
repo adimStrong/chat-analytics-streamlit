@@ -340,6 +340,91 @@ def get_shift_data(page_filter=None, start_date=None, end_date=None):
 
 
 @st.cache_data(ttl=60)
+def get_sma_daily_stats(target_date=None):
+    """Get SMA agent stats for a specific date"""
+    conn = get_connection()
+
+    if not target_date:
+        target_date = date.today()
+
+    df = pd.read_sql("""
+        SELECT
+            a.agent_name as "Agent",
+            ads.shift as "Shift",
+            ads.schedule_status as "Status",
+            ads.duty_hours as "Hours",
+            ads.messages_received as "Msg Recv",
+            ads.messages_sent as "Msg Sent",
+            ads.comments_received as "Cmt Recv",
+            ads.comment_replies as "Cmt Reply",
+            CASE
+                WHEN ads.avg_response_time_seconds IS NOT NULL
+                THEN CONCAT(
+                    FLOOR(ads.avg_response_time_seconds / 60)::int, 'm ',
+                    MOD(ads.avg_response_time_seconds::int, 60), 's'
+                )
+                ELSE '-'
+            END as "Avg RT"
+        FROM agent_daily_stats ads
+        JOIN agents a ON ads.agent_id = a.id
+        WHERE ads.date = %s
+        ORDER BY
+            CASE ads.shift
+                WHEN 'Morning' THEN 1
+                WHEN 'Mid' THEN 2
+                WHEN 'Evening' THEN 3
+                ELSE 4
+            END,
+            a.agent_name
+    """, conn, params=[target_date])
+
+    return df
+
+
+@st.cache_data(ttl=60)
+def get_sma_shift_summary(target_date=None):
+    """Get shift summary for a specific date"""
+    conn = get_connection()
+
+    if not target_date:
+        target_date = date.today()
+
+    df = pd.read_sql("""
+        SELECT
+            ads.shift as "Shift",
+            COUNT(*) FILTER (WHERE ads.schedule_status = 'present') as "Present",
+            SUM(ads.messages_received) as "Total Recv",
+            SUM(ads.messages_sent) as "Total Sent",
+            SUM(ads.comments_received) as "Total Cmt",
+            SUM(ads.comment_replies) as "Total Reply",
+            ROUND(AVG(ads.avg_response_time_seconds), 0) as "Avg RT (sec)"
+        FROM agent_daily_stats ads
+        WHERE ads.date = %s
+        GROUP BY ads.shift
+        ORDER BY
+            CASE ads.shift
+                WHEN 'Morning' THEN 1
+                WHEN 'Mid' THEN 2
+                WHEN 'Evening' THEN 3
+                ELSE 4
+            END
+    """, conn, params=[target_date])
+
+    return df
+
+
+@st.cache_data(ttl=60)
+def get_sma_available_dates():
+    """Get dates that have SMA data"""
+    conn = get_connection()
+    df = pd.read_sql("""
+        SELECT DISTINCT date FROM agent_daily_stats
+        ORDER BY date DESC
+    """, conn)
+    return df['date'].tolist()
+
+
+@st.cache_data(ttl=60)
 def get_page_rankings(start_date=None, end_date=None):
     """Get page rankings by messages and comments"""
     conn = get_connection()
@@ -464,7 +549,7 @@ with st.sidebar:
     # View selector
     view = st.radio(
         "📈 Select View",
-        ["Overview", "Daily", "Weekly", "Monthly", "Shifts", "Pages"],
+        ["Overview", "Daily", "Weekly", "Monthly", "Shifts", "Pages", "SMA Report"],
         index=0
     )
 
@@ -725,3 +810,110 @@ elif view == "Pages":
                         title='Top 10 Pages by Sessions',
                         color_discrete_sequence=['#10b981'])
             st.plotly_chart(fig, use_container_width=True)
+
+
+elif view == "SMA Report":
+    st.title("👥 SMA Daily Performance Report")
+
+    # Date selector for SMA report
+    available_dates = get_sma_available_dates()
+
+    if not available_dates:
+        st.warning("No SMA data available. Run the aggregation script first.")
+    else:
+        # Date picker
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            sma_date = st.date_input(
+                "📅 Select Date",
+                value=available_dates[0] if available_dates else date.today(),
+                min_value=min(available_dates) if available_dates else None,
+                max_value=max(available_dates) if available_dates else None
+            )
+
+        st.markdown("---")
+
+        # Agent Stats Table
+        st.subheader("📊 Agent Performance")
+
+        agent_stats = get_sma_daily_stats(sma_date)
+
+        if agent_stats.empty:
+            st.info(f"No data available for {sma_date.strftime('%B %d, %Y')}")
+        else:
+            # Style the dataframe
+            def style_status(val):
+                if val == 'present':
+                    return 'background-color: #dcfce7; color: #166534'
+                elif val == 'absent':
+                    return 'background-color: #fee2e2; color: #991b1b'
+                elif val == 'off':
+                    return 'background-color: #fef3c7; color: #92400e'
+                return ''
+
+            # Display table with styling
+            styled_df = agent_stats.style.applymap(
+                style_status, subset=['Status']
+            )
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+            # Summary metrics
+            st.markdown("---")
+            st.subheader("📈 Shift Summary")
+
+            shift_summary = get_sma_shift_summary(sma_date)
+
+            if not shift_summary.empty:
+                # Display shift summary
+                st.dataframe(shift_summary, use_container_width=True, hide_index=True)
+
+                # Visualizations
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    # Messages by shift
+                    if 'Total Recv' in shift_summary.columns:
+                        fig = go.Figure(data=[
+                            go.Bar(name='Received', x=shift_summary['Shift'], y=shift_summary['Total Recv'], marker_color='#3b82f6'),
+                            go.Bar(name='Sent', x=shift_summary['Shift'], y=shift_summary['Total Sent'], marker_color='#10b981')
+                        ])
+                        fig.update_layout(
+                            title='Messages by Shift',
+                            barmode='group',
+                            xaxis_title='Shift',
+                            yaxis_title='Count'
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                with col2:
+                    # Comments by shift
+                    if 'Total Cmt' in shift_summary.columns:
+                        fig = go.Figure(data=[
+                            go.Bar(name='Comments Received', x=shift_summary['Shift'], y=shift_summary['Total Cmt'], marker_color='#8b5cf6'),
+                            go.Bar(name='Comment Replies', x=shift_summary['Shift'], y=shift_summary['Total Reply'], marker_color='#ec4899')
+                        ])
+                        fig.update_layout(
+                            title='Comments by Shift',
+                            barmode='group',
+                            xaxis_title='Shift',
+                            yaxis_title='Count'
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+            # Daily totals
+            st.markdown("---")
+            col1, col2, col3, col4 = st.columns(4)
+
+            total_recv = agent_stats['Msg Recv'].sum() if 'Msg Recv' in agent_stats.columns else 0
+            total_sent = agent_stats['Msg Sent'].sum() if 'Msg Sent' in agent_stats.columns else 0
+            total_cmt = agent_stats['Cmt Recv'].sum() if 'Cmt Recv' in agent_stats.columns else 0
+            total_reply = agent_stats['Cmt Reply'].sum() if 'Cmt Reply' in agent_stats.columns else 0
+
+            with col1:
+                st.metric("📥 Total Messages Received", f"{total_recv:,}")
+            with col2:
+                st.metric("📤 Total Messages Sent", f"{total_sent:,}")
+            with col3:
+                st.metric("💬 Total Comments Received", f"{total_cmt:,}")
+            with col4:
+                st.metric("💭 Total Comment Replies", f"{total_reply:,}")
