@@ -6,7 +6,7 @@ Direct PostgreSQL connection, no JSON exports needed
 import streamlit as st
 import pandas as pd
 import psycopg2
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import plotly.express as px
 import plotly.graph_objects as go
 from dotenv import load_dotenv
@@ -57,14 +57,36 @@ def get_pages():
     return df
 
 
+@st.cache_data(ttl=300)
+def get_date_range():
+    """Get min and max dates from data"""
+    conn = get_connection()
+    df = pd.read_sql("""
+        SELECT
+            LEAST(
+                (SELECT MIN((message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date) FROM messages WHERE message_time >= '2025-06-01'),
+                (SELECT MIN((comment_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date) FROM comments WHERE comment_time >= '2025-06-01')
+            ) as min_date,
+            GREATEST(
+                (SELECT MAX((message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date) FROM messages),
+                (SELECT MAX((comment_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date) FROM comments)
+            ) as max_date
+    """, conn)
+    return df.iloc[0]['min_date'], df.iloc[0]['max_date']
+
+
 @st.cache_data(ttl=60)
-def get_overview_stats(page_filter=None):
+def get_overview_stats(page_filter=None, start_date=None, end_date=None):
     """Get overview statistics"""
     conn = get_connection()
 
     page_clause = ""
     if page_filter and page_filter != "All Pages":
         page_clause = f"AND m.page_id = (SELECT page_id FROM pages WHERE page_name = '{page_filter}')"
+
+    date_clause = "AND m.message_time >= '2025-06-01'"
+    if start_date and end_date:
+        date_clause = f"AND (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN '{start_date}' AND '{end_date}'"
 
     # Messages stats
     messages_df = pd.read_sql(f"""
@@ -73,30 +95,35 @@ def get_overview_stats(page_filter=None):
             COUNT(*) FILTER (WHERE is_from_page = false) as received,
             COUNT(*) FILTER (WHERE is_from_page = true) as sent
         FROM messages m
-        WHERE m.message_time >= '2025-06-01'
+        WHERE 1=1
+        {date_clause}
         {page_clause}
     """, conn)
 
     # Comments stats
     page_clause_c = page_clause.replace("m.page_id", "c.page_id")
+    date_clause_c = date_clause.replace("m.message_time", "c.comment_time")
     comments_df = pd.read_sql(f"""
         SELECT
             COUNT(*) as total_comments,
             COUNT(DISTINCT author_id) as unique_commenters
         FROM comments c
-        WHERE c.comment_time >= '2025-06-01'
+        WHERE 1=1
+        {date_clause_c}
         {page_clause_c}
     """, conn)
 
     # Sessions stats
     page_clause_s = page_clause.replace("m.page_id", "s.page_id")
+    date_clause_s = date_clause.replace("m.message_time", "s.session_start")
     sessions_df = pd.read_sql(f"""
         SELECT
             COUNT(*) as total_sessions,
             AVG(duration_seconds) as avg_duration,
             AVG(avg_response_time_seconds) as avg_response_time
         FROM sessions s
-        WHERE s.session_start >= '2025-06-01'
+        WHERE 1=1
+        {date_clause_s}
         {page_clause_s}
     """, conn)
 
@@ -108,13 +135,17 @@ def get_overview_stats(page_filter=None):
 
 
 @st.cache_data(ttl=60)
-def get_daily_data(page_filter=None, days=30):
+def get_daily_data(page_filter=None, start_date=None, end_date=None):
     """Get daily message/comment trends"""
     conn = get_connection()
 
     page_clause = ""
     if page_filter and page_filter != "All Pages":
         page_clause = f"AND page_id = (SELECT page_id FROM pages WHERE page_name = '{page_filter}')"
+
+    date_clause = "AND message_time >= '2025-06-01'"
+    if start_date and end_date:
+        date_clause = f"AND (message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN '{start_date}' AND '{end_date}'"
 
     # Daily messages
     messages_df = pd.read_sql(f"""
@@ -124,20 +155,23 @@ def get_daily_data(page_filter=None, days=30):
             COUNT(*) FILTER (WHERE is_from_page = false) as received,
             COUNT(*) FILTER (WHERE is_from_page = true) as sent
         FROM messages
-        WHERE message_time >= NOW() - INTERVAL '{days} days'
+        WHERE 1=1
+        {date_clause}
         {page_clause}
         GROUP BY date
         ORDER BY date
     """, conn)
 
     # Daily comments
+    date_clause_c = date_clause.replace("message_time", "comment_time")
     comments_df = pd.read_sql(f"""
         SELECT
             (comment_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date as date,
             COUNT(*) as total_comments,
             COUNT(DISTINCT author_id) as unique_commenters
         FROM comments
-        WHERE comment_time >= NOW() - INTERVAL '{days} days'
+        WHERE 1=1
+        {date_clause_c}
         {page_clause}
         GROUP BY date
         ORDER BY date
@@ -147,13 +181,17 @@ def get_daily_data(page_filter=None, days=30):
 
 
 @st.cache_data(ttl=60)
-def get_weekly_data(page_filter=None, weeks=12):
+def get_weekly_data(page_filter=None, start_date=None, end_date=None):
     """Get weekly trends"""
     conn = get_connection()
 
     page_clause = ""
     if page_filter and page_filter != "All Pages":
         page_clause = f"AND page_id = (SELECT page_id FROM pages WHERE page_name = '{page_filter}')"
+
+    date_clause = "AND message_time >= '2025-06-01'"
+    if start_date and end_date:
+        date_clause = f"AND (message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN '{start_date}' AND '{end_date}'"
 
     messages_df = pd.read_sql(f"""
         SELECT
@@ -162,37 +200,42 @@ def get_weekly_data(page_filter=None, weeks=12):
             COUNT(*) FILTER (WHERE is_from_page = false) as received,
             COUNT(*) FILTER (WHERE is_from_page = true) as sent
         FROM messages
-        WHERE message_time >= '2025-06-01'
+        WHERE 1=1
+        {date_clause}
         {page_clause}
         GROUP BY week_start
         ORDER BY week_start DESC
-        LIMIT {weeks}
     """, conn)
 
+    date_clause_c = date_clause.replace("message_time", "comment_time")
     comments_df = pd.read_sql(f"""
         SELECT
             DATE_TRUNC('week', (comment_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila'))::date as week_start,
             COUNT(*) as total_comments,
             COUNT(DISTINCT author_id) as unique_commenters
         FROM comments
-        WHERE comment_time >= '2025-06-01'
+        WHERE 1=1
+        {date_clause_c}
         {page_clause}
         GROUP BY week_start
         ORDER BY week_start DESC
-        LIMIT {weeks}
     """, conn)
 
     return messages_df, comments_df
 
 
 @st.cache_data(ttl=60)
-def get_monthly_data(page_filter=None):
+def get_monthly_data(page_filter=None, start_date=None, end_date=None):
     """Get monthly trends"""
     conn = get_connection()
 
     page_clause = ""
     if page_filter and page_filter != "All Pages":
         page_clause = f"AND page_id = (SELECT page_id FROM pages WHERE page_name = '{page_filter}')"
+
+    date_clause = "AND message_time >= '2025-06-01'"
+    if start_date and end_date:
+        date_clause = f"AND (message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN '{start_date}' AND '{end_date}'"
 
     messages_df = pd.read_sql(f"""
         SELECT
@@ -202,12 +245,14 @@ def get_monthly_data(page_filter=None):
             COUNT(*) FILTER (WHERE is_from_page = false) as received,
             COUNT(*) FILTER (WHERE is_from_page = true) as sent
         FROM messages
-        WHERE message_time >= '2025-06-01'
+        WHERE 1=1
+        {date_clause}
         {page_clause}
         GROUP BY month, month_name
         ORDER BY month DESC
     """, conn)
 
+    date_clause_c = date_clause.replace("message_time", "comment_time")
     comments_df = pd.read_sql(f"""
         SELECT
             DATE_TRUNC('month', (comment_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila'))::date as month,
@@ -215,7 +260,8 @@ def get_monthly_data(page_filter=None):
             COUNT(*) as total_comments,
             COUNT(DISTINCT author_id) as unique_commenters
         FROM comments
-        WHERE comment_time >= '2025-06-01'
+        WHERE 1=1
+        {date_clause_c}
         {page_clause}
         GROUP BY month, month_name
         ORDER BY month DESC
@@ -225,13 +271,17 @@ def get_monthly_data(page_filter=None):
 
 
 @st.cache_data(ttl=60)
-def get_shift_data(page_filter=None):
+def get_shift_data(page_filter=None, start_date=None, end_date=None):
     """Get shift breakdown"""
     conn = get_connection()
 
     page_clause = ""
     if page_filter and page_filter != "All Pages":
         page_clause = f"AND page_id = (SELECT page_id FROM pages WHERE page_name = '{page_filter}')"
+
+    date_clause = "AND message_time >= '2025-06-01'"
+    if start_date and end_date:
+        date_clause = f"AND (message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN '{start_date}' AND '{end_date}'"
 
     messages_df = pd.read_sql(f"""
         WITH shifts AS (
@@ -243,7 +293,8 @@ def get_shift_data(page_filter=None):
                 END as shift,
                 is_from_page
             FROM messages
-            WHERE message_time >= '2025-06-01'
+            WHERE 1=1
+            {date_clause}
             {page_clause}
         )
         SELECT
@@ -261,6 +312,7 @@ def get_shift_data(page_filter=None):
             END
     """, conn)
 
+    date_clause_c = date_clause.replace("message_time", "comment_time")
     comments_df = pd.read_sql(f"""
         WITH shifts AS (
             SELECT
@@ -270,7 +322,8 @@ def get_shift_data(page_filter=None):
                     ELSE 'Evening (10pm-6am)'
                 END as shift
             FROM comments
-            WHERE comment_time >= '2025-06-01'
+            WHERE 1=1
+            {date_clause_c}
             {page_clause}
         )
         SELECT
@@ -290,11 +343,15 @@ def get_shift_data(page_filter=None):
 
 
 @st.cache_data(ttl=60)
-def get_page_rankings():
+def get_page_rankings(start_date=None, end_date=None):
     """Get page rankings by messages and comments"""
     conn = get_connection()
 
-    messages_df = pd.read_sql("""
+    date_clause = "AND m.message_time >= '2025-06-01'"
+    if start_date and end_date:
+        date_clause = f"AND (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN '{start_date}' AND '{end_date}'"
+
+    messages_df = pd.read_sql(f"""
         SELECT
             p.page_name,
             COUNT(*) as total_messages,
@@ -303,32 +360,40 @@ def get_page_rankings():
             ROUND(100.0 * COUNT(*) FILTER (WHERE m.is_from_page = true) /
                   NULLIF(COUNT(*) FILTER (WHERE m.is_from_page = false), 0), 1) as response_rate
         FROM pages p
-        LEFT JOIN messages m ON p.page_id = m.page_id AND m.message_time >= '2025-06-01'
+        LEFT JOIN messages m ON p.page_id = m.page_id
+        WHERE 1=1
+        {date_clause}
         GROUP BY p.page_name
         HAVING COUNT(*) > 0
         ORDER BY total_messages DESC
     """, conn)
 
-    comments_df = pd.read_sql("""
+    date_clause_c = date_clause.replace("m.message_time", "c.comment_time")
+    comments_df = pd.read_sql(f"""
         SELECT
             p.page_name,
             COUNT(*) as total_comments,
             COUNT(DISTINCT c.author_id) as unique_commenters
         FROM pages p
-        LEFT JOIN comments c ON p.page_id = c.page_id AND c.comment_time >= '2025-06-01'
+        LEFT JOIN comments c ON p.page_id = c.page_id
+        WHERE 1=1
+        {date_clause_c}
         GROUP BY p.page_name
         HAVING COUNT(*) > 0
         ORDER BY total_comments DESC
     """, conn)
 
-    sessions_df = pd.read_sql("""
+    date_clause_s = date_clause.replace("m.message_time", "s.session_start")
+    sessions_df = pd.read_sql(f"""
         SELECT
             p.page_name,
             COUNT(*) as total_sessions,
             ROUND(AVG(s.duration_seconds)::numeric, 0) as avg_duration,
             ROUND(AVG(s.avg_response_time_seconds)::numeric, 0) as avg_response_time
         FROM pages p
-        LEFT JOIN sessions s ON p.page_id = s.page_id AND s.session_start >= '2025-06-01'
+        LEFT JOIN sessions s ON p.page_id = s.page_id
+        WHERE 1=1
+        {date_clause_s}
         GROUP BY p.page_name
         ORDER BY total_sessions DESC
     """, conn)
@@ -350,6 +415,55 @@ with st.sidebar:
 
     st.markdown("---")
 
+    # Date range picker
+    st.subheader("📅 Date Range")
+    min_date, max_date = get_date_range()
+
+    # Quick presets
+    preset = st.selectbox(
+        "Quick Select",
+        ["Custom", "Last 7 Days", "Last 30 Days", "Last 90 Days", "This Month", "Last Month", "All Time"],
+        index=2  # Default to Last 30 Days
+    )
+
+    today = date.today()
+
+    if preset == "Last 7 Days":
+        start_date = today - timedelta(days=7)
+        end_date = today
+    elif preset == "Last 30 Days":
+        start_date = today - timedelta(days=30)
+        end_date = today
+    elif preset == "Last 90 Days":
+        start_date = today - timedelta(days=90)
+        end_date = today
+    elif preset == "This Month":
+        start_date = today.replace(day=1)
+        end_date = today
+    elif preset == "Last Month":
+        first_of_month = today.replace(day=1)
+        end_date = first_of_month - timedelta(days=1)
+        start_date = end_date.replace(day=1)
+    elif preset == "All Time":
+        start_date = min_date
+        end_date = max_date
+    else:  # Custom
+        start_date = min_date
+        end_date = max_date
+
+    # Date inputs (enabled for Custom or to override presets)
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input("From", value=start_date, min_value=min_date, max_value=max_date)
+    with col2:
+        end_date = st.date_input("To", value=end_date, min_value=min_date, max_value=max_date)
+
+    # Show selected range
+    days_selected = (end_date - start_date).days + 1
+    st.caption(f"📆 {days_selected} days selected")
+
+    st.markdown("---")
+
     # View selector
     view = st.radio(
         "📈 Select View",
@@ -358,7 +472,6 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.caption("Data from June 2025 onwards")
     st.caption("All times in Philippine Time (UTC+8)")
 
 
@@ -369,10 +482,14 @@ with st.sidebar:
 if view == "Overview":
     st.title("📊 Overview Dashboard")
 
+    # Show filters
+    filter_info = []
     if selected_page != "All Pages":
-        st.info(f"Showing data for: **{selected_page}**")
+        filter_info.append(f"Page: **{selected_page}**")
+    filter_info.append(f"Date: **{start_date.strftime('%b %d, %Y')}** to **{end_date.strftime('%b %d, %Y')}**")
+    st.info(" | ".join(filter_info))
 
-    stats = get_overview_stats(selected_page)
+    stats = get_overview_stats(selected_page, start_date, end_date)
 
     # Metrics row
     col1, col2, col3, col4 = st.columns(4)
@@ -398,13 +515,16 @@ if view == "Overview":
     with col2:
         st.metric("👥 Unique Commenters", f"{stats['comments']['unique_commenters']:,}")
     with col3:
-        st.metric("🔄 Total Sessions", f"{stats['sessions']['total_sessions']:,}")
+        sessions_val = stats['sessions']['total_sessions']
+        if sessions_val is None:
+            sessions_val = 0
+        st.metric("🔄 Total Sessions", f"{int(sessions_val):,}")
 
     # Charts
     st.markdown("---")
-    st.subheader("📈 Last 30 Days Trend")
+    st.subheader("📈 Trends")
 
-    messages_df, comments_df = get_daily_data(selected_page, 30)
+    messages_df, comments_df = get_daily_data(selected_page, start_date, end_date)
 
     if not messages_df.empty:
         fig = px.line(messages_df, x='date', y=['received', 'sent'],
@@ -423,11 +543,13 @@ if view == "Overview":
 elif view == "Daily":
     st.title("📅 Daily Analysis")
 
+    filter_info = []
     if selected_page != "All Pages":
-        st.info(f"Showing data for: **{selected_page}**")
+        filter_info.append(f"Page: **{selected_page}**")
+    filter_info.append(f"Date: **{start_date.strftime('%b %d, %Y')}** to **{end_date.strftime('%b %d, %Y')}**")
+    st.info(" | ".join(filter_info))
 
-    days = st.slider("Number of days", 7, 90, 30)
-    messages_df, comments_df = get_daily_data(selected_page, days)
+    messages_df, comments_df = get_daily_data(selected_page, start_date, end_date)
 
     col1, col2 = st.columns(2)
 
@@ -458,10 +580,13 @@ elif view == "Daily":
 elif view == "Weekly":
     st.title("📆 Weekly Analysis")
 
+    filter_info = []
     if selected_page != "All Pages":
-        st.info(f"Showing data for: **{selected_page}**")
+        filter_info.append(f"Page: **{selected_page}**")
+    filter_info.append(f"Date: **{start_date.strftime('%b %d, %Y')}** to **{end_date.strftime('%b %d, %Y')}**")
+    st.info(" | ".join(filter_info))
 
-    messages_df, comments_df = get_weekly_data(selected_page, 12)
+    messages_df, comments_df = get_weekly_data(selected_page, start_date, end_date)
 
     col1, col2 = st.columns(2)
 
@@ -488,10 +613,13 @@ elif view == "Weekly":
 elif view == "Monthly":
     st.title("📊 Monthly Analysis")
 
+    filter_info = []
     if selected_page != "All Pages":
-        st.info(f"Showing data for: **{selected_page}**")
+        filter_info.append(f"Page: **{selected_page}**")
+    filter_info.append(f"Date: **{start_date.strftime('%b %d, %Y')}** to **{end_date.strftime('%b %d, %Y')}**")
+    st.info(" | ".join(filter_info))
 
-    messages_df, comments_df = get_monthly_data(selected_page)
+    messages_df, comments_df = get_monthly_data(selected_page, start_date, end_date)
 
     col1, col2 = st.columns(2)
 
@@ -525,10 +653,13 @@ elif view == "Monthly":
 elif view == "Shifts":
     st.title("⏰ Shift Analysis")
 
+    filter_info = []
     if selected_page != "All Pages":
-        st.info(f"Showing data for: **{selected_page}**")
+        filter_info.append(f"Page: **{selected_page}**")
+    filter_info.append(f"Date: **{start_date.strftime('%b %d, %Y')}** to **{end_date.strftime('%b %d, %Y')}**")
+    st.info(" | ".join(filter_info))
 
-    messages_df, comments_df = get_shift_data(selected_page)
+    messages_df, comments_df = get_shift_data(selected_page, start_date, end_date)
 
     col1, col2 = st.columns(2)
 
@@ -557,7 +688,9 @@ elif view == "Shifts":
 elif view == "Pages":
     st.title("📄 Page Rankings")
 
-    messages_df, comments_df, sessions_df = get_page_rankings()
+    st.info(f"Date: **{start_date.strftime('%b %d, %Y')}** to **{end_date.strftime('%b %d, %Y')}**")
+
+    messages_df, comments_df, sessions_df = get_page_rankings(start_date, end_date)
 
     tab1, tab2, tab3 = st.tabs(["💬 Messages", "💭 Comments", "🔄 Sessions"])
 
