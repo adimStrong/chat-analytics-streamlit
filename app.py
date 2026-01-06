@@ -57,7 +57,7 @@ def get_pages():
     return df
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)
 def get_date_range():
     """Get min and max dates from data - Comments start from Dec 7, 2025"""
     conn = get_connection()
