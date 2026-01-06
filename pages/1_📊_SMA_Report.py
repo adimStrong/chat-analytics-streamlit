@@ -1281,108 +1281,102 @@ with tab5:
 # EXPORT FUNCTIONALITY
 # ============================================
 def generate_sma_html_report():
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <title>SMA Performance Report - {start_date.strftime('%b %d')} to {end_date.strftime('%b %d, %Y')}</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; padding: 20px; max-width: 1200px; margin: 0 auto; }}
-        h1 {{ color: #1f2937; border-bottom: 2px solid #3B82F6; padding-bottom: 10px; }}
-        h2 {{ color: #374151; margin-top: 30px; }}
-        .header {{ background: linear-gradient(135deg, #3B82F6, #10B981); color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }}
-        .header h1 {{ color: white; border: none; margin: 0; }}
-        .summary-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin: 20px 0; }}
-        .metric-card {{ background: #f3f4f6; padding: 15px; border-radius: 8px; text-align: center; }}
-        .metric-value {{ font-size: 24px; font-weight: bold; color: #1f2937; }}
-        .metric-label {{ font-size: 12px; color: #6b7280; margin-top: 5px; }}
-        table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
-        th, td {{ border: 1px solid #e5e7eb; padding: 10px; text-align: left; }}
-        th {{ background: #f9fafb; font-weight: 600; }}
-        tr:nth-child(even) {{ background: #f9fafb; }}
-        .footer {{ margin-top: 30px; padding-top: 15px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; }}
-        @media print {{ body {{ padding: 10px; }} .header {{ background: #3B82F6 !important; -webkit-print-color-adjust: exact; }} }}
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>👥 SMA Performance Report</h1>
-        <p>Period: {start_date.strftime('%b %d, %Y')} - {end_date.strftime('%b %d, %Y')}</p>
-        <p>Generated: {date.today().strftime('%B %d, %Y')}</p>
-    </div>
-    
-    <h2>📈 Summary Metrics</h2>
-    <div class="summary-grid">
-        <div class="metric-card">
-            <div class="metric-value">{totals['msg_recv']:,}</div>
-            <div class="metric-label">📥 Messages Received</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-value">{totals['msg_sent']:,}</div>
-            <div class="metric-label">📤 Messages Sent</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-value">{totals['cmt_recv']:,}</div>
-            <div class="metric-label">💬 Comments Received</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-value">{totals['cmt_reply']:,}</div>
-            <div class="metric-label">↩️ Page Replies</div>
-        </div>
-    </div>
-"""
+    """Generate HTML report for PDF export"""
+    # Build HTML using string concatenation to avoid f-string multiline issues
+    html_parts = []
+
+    html_parts.append('<!DOCTYPE html>')
+    html_parts.append('<html>')
+    html_parts.append('<head>')
+    html_parts.append(f'    <title>SMA Performance Report - {start_date.strftime("%b %d")} to {end_date.strftime("%b %d, %Y")}</title>')
+    html_parts.append('    <style>')
+    html_parts.append('        body { font-family: Arial, sans-serif; padding: 20px; max-width: 1200px; margin: 0 auto; }')
+    html_parts.append('        h1 { color: #1f2937; border-bottom: 2px solid #3B82F6; padding-bottom: 10px; }')
+    html_parts.append('        h2 { color: #374151; margin-top: 30px; }')
+    html_parts.append('        .header { background: linear-gradient(135deg, #3B82F6, #10B981); color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }')
+    html_parts.append('        .header h1 { color: white; border: none; margin: 0; }')
+    html_parts.append('        .summary-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin: 20px 0; }')
+    html_parts.append('        .metric-card { background: #f3f4f6; padding: 15px; border-radius: 8px; text-align: center; }')
+    html_parts.append('        .metric-value { font-size: 24px; font-weight: bold; color: #1f2937; }')
+    html_parts.append('        .metric-label { font-size: 12px; color: #6b7280; margin-top: 5px; }')
+    html_parts.append('        table { width: 100%; border-collapse: collapse; margin: 15px 0; }')
+    html_parts.append('        th, td { border: 1px solid #e5e7eb; padding: 10px; text-align: left; }')
+    html_parts.append('        th { background: #f9fafb; font-weight: 600; }')
+    html_parts.append('        tr:nth-child(even) { background: #f9fafb; }')
+    html_parts.append('        .footer { margin-top: 30px; padding-top: 15px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; }')
+    html_parts.append('        @media print { body { padding: 10px; } .header { background: #3B82F6 !important; -webkit-print-color-adjust: exact; } }')
+    html_parts.append('    </style>')
+    html_parts.append('</head>')
+    html_parts.append('<body>')
+    html_parts.append('    <div class="header">')
+    html_parts.append('        <h1>SMA Performance Report</h1>')
+    html_parts.append(f'        <p>Period: {start_date.strftime("%b %d, %Y")} - {end_date.strftime("%b %d, %Y")}</p>')
+    html_parts.append(f'        <p>Generated: {date.today().strftime("%B %d, %Y")}</p>')
+    html_parts.append('    </div>')
+    html_parts.append('    <h2>Summary Metrics</h2>')
+    html_parts.append('    <div class="summary-grid">')
+    html_parts.append('        <div class="metric-card">')
+    html_parts.append(f'            <div class="metric-value">{totals["msg_recv"]:,}</div>')
+    html_parts.append('            <div class="metric-label">Messages Received</div>')
+    html_parts.append('        </div>')
+    html_parts.append('        <div class="metric-card">')
+    html_parts.append(f'            <div class="metric-value">{totals["msg_sent"]:,}</div>')
+    html_parts.append('            <div class="metric-label">Messages Sent</div>')
+    html_parts.append('        </div>')
+    html_parts.append('        <div class="metric-card">')
+    html_parts.append(f'            <div class="metric-value">{totals["cmt_recv"]:,}</div>')
+    html_parts.append('            <div class="metric-label">Comments Received</div>')
+    html_parts.append('        </div>')
+    html_parts.append('        <div class="metric-card">')
+    html_parts.append(f'            <div class="metric-value">{totals["cmt_reply"]:,}</div>')
+    html_parts.append('            <div class="metric-label">Page Replies</div>')
+    html_parts.append('        </div>')
+    html_parts.append('    </div>')
 
     # Add page breakdown table
     if not page_breakdown.empty:
-        html += """
-    <h2>📄 Performance by Page</h2>
-    <table>
-        <tr><th>Page</th><th>Msg Recv</th><th>Msg Sent</th><th>Response Rate %</th></tr>
-"""
+        html_parts.append('    <h2>Performance by Page</h2>')
+        html_parts.append('    <table>')
+        html_parts.append('        <tr><th>Page</th><th>Msg Recv</th><th>Msg Sent</th><th>Response Rate %</th></tr>')
         for _, row in page_breakdown.iterrows():
-            html += f"        <tr><td>{row['Page']}</td><td>{row['Msg Recv']:,}</td><td>{row['Msg Sent']:,}</td><td>{row['Response Rate %']}%</td></tr>
-"
-        html += "    </table>
-"
-    
-    # Add shift breakdown table  
+            html_parts.append(f'        <tr><td>{row["Page"]}</td><td>{row["Msg Recv"]:,}</td><td>{row["Msg Sent"]:,}</td><td>{row["Response Rate %"]}%</td></tr>')
+        html_parts.append('    </table>')
+
+    # Add shift breakdown table
     if not shift_breakdown.empty:
-        html += """
-    <h2>🕐 Performance by Shift</h2>
-    <table>
-        <tr><th>Shift</th><th>Total</th><th>Received</th><th>Sent</th><th>Response Rate %</th></tr>
-"""
+        html_parts.append('    <h2>Performance by Shift</h2>')
+        html_parts.append('    <table>')
+        html_parts.append('        <tr><th>Shift</th><th>Total</th><th>Received</th><th>Sent</th><th>Response Rate %</th></tr>')
         for _, row in shift_breakdown.iterrows():
-            html += f"        <tr><td>{row['Shift']}</td><td>{row['Total Messages']:,}</td><td>{row['Received']:,}</td><td>{row['Sent']:,}</td><td>{row['Response Rate %']}%</td></tr>
-"
-        html += "    </table>
-"
-    
-    html += """
-    <div class="footer">
-        <p><strong>How to save as PDF:</strong> Press Ctrl+P (or Cmd+P on Mac) → Select "Save as PDF" as destination</p>
-        <p>All times in Philippine Time (UTC+8) | Data from Facebook Graph API</p>
-    </div>
-</body>
-</html>"""
-    return html
+            html_parts.append(f'        <tr><td>{row["Shift"]}</td><td>{row["Total Messages"]:,}</td><td>{row["Received"]:,}</td><td>{row["Sent"]:,}</td><td>{row["Response Rate %"]}%</td></tr>')
+        html_parts.append('    </table>')
+
+    html_parts.append('    <div class="footer">')
+    html_parts.append('        <p><strong>How to save as PDF:</strong> Press Ctrl+P (or Cmd+P on Mac) and select "Save as PDF" as destination</p>')
+    html_parts.append('        <p>All times in Philippine Time (UTC+8) | Data from Facebook Graph API</p>')
+    html_parts.append('    </div>')
+    html_parts.append('</body>')
+    html_parts.append('</html>')
+
+    return '\n'.join(html_parts)
 
 # Export buttons in sidebar
 with st.sidebar:
     st.markdown("---")
-    st.subheader("📥 Export Report")
-    
+    st.subheader("Export Report")
+
     filename_base = f"SMA_Report_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}"
-    
+
     # HTML Export (for PDF)
     html_report = generate_sma_html_report()
     st.download_button(
-        label="📄 Download Report (HTML/PDF)",
+        label="Download Report (HTML/PDF)",
         data=html_report,
         file_name=f"{filename_base}.html",
         mime="text/html",
         help="Open in browser, then Print > Save as PDF"
     )
-    st.caption("HTML: Open in browser → Print → Save as PDF")
+    st.caption("HTML: Open in browser > Print > Save as PDF")
 
 # Footer
 st.markdown("---")
