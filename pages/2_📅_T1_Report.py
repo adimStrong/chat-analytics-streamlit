@@ -127,9 +127,9 @@ cmt_reply = cmt_row[0] if cmt_row else 0
 # Response rate
 response_rate = (msg_sent / msg_recv * 100) if msg_recv > 0 else 0
 
-# Display summary cards (removed New Conversations - same as Unique Users in FB Messenger)
+# Display summary cards
 st.subheader("📈 Daily Summary")
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 
 with col1:
     st.metric("📥 Messages Received", f"{msg_recv:,}")
@@ -138,8 +138,10 @@ with col2:
 with col3:
     st.metric("👥 Unique Users", f"{unique_users:,}")
 with col4:
-    st.metric("📊 Response Rate", f"{response_rate:.1f}%")
+    st.metric("💬 New Conversations", f"{new_convos:,}")
 with col5:
+    st.metric("📊 Response Rate", f"{response_rate:.1f}%")
+with col6:
     st.metric("↩️ Page Comments", f"{cmt_reply:,}")
 
 st.markdown("---")
@@ -384,8 +386,8 @@ else:
 # EXPORT FUNCTIONALITY (in sidebar)
 # ============================================
 export_data = {
-    'Metric': ['Messages Received', 'Messages Sent', 'Unique Users', 'Response Rate', 'Page Comments'],
-    'Value': [msg_recv, msg_sent, unique_users, f"{response_rate:.1f}%", cmt_reply]
+    'Metric': ['Messages Received', 'Messages Sent', 'Unique Users', 'New Conversations', 'Response Rate', 'Page Comments'],
+    'Value': [msg_recv, msg_sent, unique_users, new_convos, f"{response_rate:.1f}%", cmt_reply]
 }
 export_df = pd.DataFrame(export_data)
 
@@ -432,7 +434,7 @@ def generate_html_report():
         h2 {{ color: #374151; margin-top: 30px; }}
         .header {{ background: linear-gradient(135deg, #3B82F6, #10B981); color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }}
         .header h1 {{ color: white; border: none; margin: 0; }}
-        .summary-grid {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 15px; margin: 20px 0; }}
+        .summary-grid {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 15px; margin: 20px 0; }}
         .metric-card {{ background: #f3f4f6; padding: 15px; border-radius: 8px; text-align: center; }}
         .metric-value {{ font-size: 24px; font-weight: bold; color: #1f2937; }}
         .metric-label {{ font-size: 12px; color: #6b7280; margin-top: 5px; }}
@@ -464,6 +466,10 @@ def generate_html_report():
         <div class="metric-card">
             <div class="metric-value">{unique_users:,}</div>
             <div class="metric-label">👥 Unique Users</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-value">{new_convos:,}</div>
+            <div class="metric-label">💬 New Conversations</div>
         </div>
         <div class="metric-card">
             <div class="metric-value">{response_rate:.1f}%</div>
@@ -560,6 +566,7 @@ st.caption("""
 - **Messages Received**: Incoming messages from users
 - **Messages Sent**: Outgoing replies from page
 - **Unique Users**: Distinct users who sent messages
+- **New Conversations**: Active conversation threads on the day
 - **Page Comments**: Comments posted by the page (replies to users)
 - **Response Rate**: Messages Sent / Messages Received x 100%
 """)
