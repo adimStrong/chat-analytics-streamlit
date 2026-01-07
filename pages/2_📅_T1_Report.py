@@ -86,16 +86,15 @@ with st.sidebar:
 # ============================================
 # TITLE (After date selection so it updates)
 # ============================================
-col_logo, col_title = st.columns([1, 5])
+col_logo, col_title = st.columns([0.08, 0.92])
 with col_logo:
-    st.image("Juan365.jpg", width=80)
+    st.image("Juan365.jpg", width=60)
 with col_title:
-    st.title("Daily Report")
     if use_date_range:
-        st.markdown(f"**Report Period: {date_label}**")
+        st.markdown(f"## Daily Report &nbsp;&nbsp; | &nbsp;&nbsp; {date_label}")
     else:
-        st.markdown(f"**Report Date: {date_label}**")
-st.caption(f"Generated on: {today.strftime('%B %d, %Y')} | All times in Philippine Time (UTC+8)")
+        st.markdown(f"## Daily Report &nbsp;&nbsp; | &nbsp;&nbsp; {date_label}")
+    st.caption(f"Generated: {today.strftime('%B %d, %Y')} | All times in Philippine Time (UTC+8)")
 
 st.markdown("---")
 
