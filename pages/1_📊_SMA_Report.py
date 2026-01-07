@@ -1317,19 +1317,19 @@ def generate_sma_html_report():
     html_parts.append('    <div class="summary-grid">')
     html_parts.append('        <div class="metric-card">')
     html_parts.append(f'            <div class="metric-value">{totals["msg_recv"]:,}</div>')
-    html_parts.append('            <div class="metric-label">Messages Received</div>')
+    html_parts.append('            <div class="metric-label">📥 Messages Received</div>')
     html_parts.append('        </div>')
     html_parts.append('        <div class="metric-card">')
     html_parts.append(f'            <div class="metric-value">{totals["msg_sent"]:,}</div>')
-    html_parts.append('            <div class="metric-label">Messages Sent</div>')
+    html_parts.append('            <div class="metric-label">📤 Messages Sent</div>')
     html_parts.append('        </div>')
     html_parts.append('        <div class="metric-card">')
-    html_parts.append(f'            <div class="metric-value">{totals["cmt_recv"]:,}</div>')
-    html_parts.append('            <div class="metric-label">Comments Received</div>')
+    html_parts.append(f'            <div class="metric-value">{totals["unique_convos"]:,}</div>')
+    html_parts.append('            <div class="metric-label">👥 Unique Conversations</div>')
     html_parts.append('        </div>')
     html_parts.append('        <div class="metric-card">')
     html_parts.append(f'            <div class="metric-value">{totals["cmt_reply"]:,}</div>')
-    html_parts.append('            <div class="metric-label">Page Replies</div>')
+    html_parts.append('            <div class="metric-label">↩️ Page Replies</div>')
     html_parts.append('        </div>')
     html_parts.append('    </div>')
 
@@ -1349,6 +1349,30 @@ def generate_sma_html_report():
         html_parts.append('        <tr><th>Shift</th><th>Total</th><th>Received</th><th>Sent</th><th>Response Rate %</th></tr>')
         for _, row in shift_breakdown.iterrows():
             html_parts.append(f'        <tr><td>{row["Shift"]}</td><td>{row["Total Messages"]:,}</td><td>{row["Received"]:,}</td><td>{row["Sent"]:,}</td><td>{row["Response Rate %"]}%</td></tr>')
+        html_parts.append('    </table>')
+
+    # Add Agent Performance Summary table
+    sma_summary_export = get_sma_summary(start_date, end_date)
+    sma_new_chats_export = get_sma_new_chats(start_date, end_date)
+    sma_session_export = get_sma_session_stats(start_date, end_date)
+
+    if not sma_summary_export.empty:
+        # Merge new chats and session stats
+        sma_export_df = sma_summary_export.copy()
+        if not sma_new_chats_export.empty:
+            sma_export_df = sma_export_df.merge(sma_new_chats_export[['SMA', 'Shift', 'New Chats']], on=['SMA', 'Shift'], how='left')
+        if not sma_session_export.empty:
+            sma_export_df = sma_export_df.merge(sma_session_export[['SMA', 'Shift', 'Unique Users', 'Avg Human RT (s)']], on=['SMA', 'Shift'], how='left')
+
+        html_parts.append('    <h2>👥 Agent Performance Summary</h2>')
+        html_parts.append('    <table>')
+        html_parts.append('        <tr><th>SMA</th><th>Shift</th><th>New Chats</th><th>Unique Users</th><th>Msg Recv</th><th>Msg Sent</th><th>Cmt Reply</th><th>Avg RT</th></tr>')
+        for _, row in sma_export_df.iterrows():
+            new_chats = int(row['New Chats']) if pd.notna(row.get('New Chats')) else 0
+            unique_users = int(row['Unique Users']) if pd.notna(row.get('Unique Users')) else 0
+            avg_rt = row.get('Avg RT (s)', 0) or 0
+            avg_rt_str = f"{avg_rt/60:.1f}m" if avg_rt >= 60 else f"{avg_rt:.0f}s" if avg_rt else "N/A"
+            html_parts.append(f'        <tr><td>{row["SMA"]}</td><td>{row["Shift"]}</td><td>{new_chats:,}</td><td>{unique_users:,}</td><td>{int(row["Msg Recv"]):,}</td><td>{int(row["Msg Sent"]):,}</td><td>{int(row["Cmt Reply"]):,}</td><td>{avg_rt_str}</td></tr>')
         html_parts.append('    </table>')
 
     html_parts.append('    <div class="footer">')
