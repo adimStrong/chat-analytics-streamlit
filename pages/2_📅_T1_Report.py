@@ -370,6 +370,62 @@ else:
 st.markdown("---")
 
 # ============================================
+# SMA PERFORMANCE BY PAGE (Matrix Table)
+# ============================================
+st.subheader("📄 SMA Performance by Page")
+
+cur.execute("""
+    WITH agent_pages AS (
+        SELECT DISTINCT a.id as agent_id, a.agent_name, apa.page_id, apa.shift, p.page_name
+        FROM agents a
+        JOIN agent_page_assignments apa ON a.id = apa.agent_id
+        JOIN pages p ON apa.page_id = p.page_id
+        WHERE a.is_active = true AND apa.is_active = true
+    )
+    SELECT
+        ap.agent_name,
+        ap.page_name,
+        ap.shift,
+        COUNT(*) FILTER (WHERE m.is_from_page = false) as msg_recv,
+        COUNT(*) FILTER (WHERE m.is_from_page = true) as msg_sent,
+        COUNT(DISTINCT m.sender_id) FILTER (WHERE m.is_from_page = false) as unique_users
+    FROM agent_pages ap
+    LEFT JOIN messages m ON ap.page_id = m.page_id
+        AND (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+        AND CASE ap.shift
+            WHEN 'Morning' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
+            WHEN 'Mid' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
+            ELSE EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
+        END
+    GROUP BY ap.agent_name, ap.page_name, ap.shift
+    HAVING COUNT(*) FILTER (WHERE m.is_from_page = false) > 0 OR COUNT(*) FILTER (WHERE m.is_from_page = true) > 0
+    ORDER BY ap.agent_name, ap.shift, msg_recv DESC
+""", (from_date, to_date))
+page_matrix_data = cur.fetchall()
+
+if page_matrix_data:
+    page_matrix_df = pd.DataFrame(page_matrix_data, columns=['Agent', 'Page', 'Shift', 'Msg Recv', 'Msg Sent', 'Unique Users'])
+
+    # Format numbers
+    page_matrix_display = page_matrix_df.copy()
+    for col in ['Msg Recv', 'Msg Sent', 'Unique Users']:
+        page_matrix_display[col] = page_matrix_display[col].apply(format_number)
+
+    st.dataframe(page_matrix_display, hide_index=True, use_container_width=True)
+
+    with st.expander("ℹ️ About this table"):
+        st.markdown("""
+        This table shows each agent's performance broken down by the pages they manage.
+        - **Page**: The Facebook page the agent is assigned to
+        - **Shift**: The shift during which the agent manages this page
+        - **Metrics**: Messages and users during the agent's shift hours on each page
+        """)
+else:
+    st.info("No page-level data available for the selected date range.")
+
+st.markdown("---")
+
+# ============================================
 # BY SHIFT BREAKDOWN
 # ============================================
 st.subheader("🕐 Performance by Shift")
