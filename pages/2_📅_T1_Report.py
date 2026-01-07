@@ -720,28 +720,39 @@ def generate_html_report():
             days_display = f"{row[12]}/{row[13]}" if row[12] is not None and row[13] is not None else "-"
             html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td style='{status_style}'>{row[2]}</td><td>{row[3] or '-'}</td><td>{row[4]:,}</td><td>{row[5]:,}</td><td>{row[6]:,}</td><td>{row[7]:,}</td><td>{row[8]:,}</td><td>{resp_pct}</td><td>{avg_rt}</td><td>{human_rt}</td><td>{days_display}</td></tr>\n"
         html += "    </table>\n"
-    
+
+    # Add SMA Performance by Page table
+    if page_matrix_data:
+        html += """
+    <h2>📄 SMA Performance by Page</h2>
+    <table>
+        <tr><th>Agent</th><th>Page</th><th>Shift</th><th>Msg Recv</th><th>Msg Sent</th><th>Unique Users</th></tr>
+"""
+        for row in page_matrix_data:
+            html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td><td>{row[3]:,}</td><td>{row[4]:,}</td><td>{row[5]:,}</td></tr>\n"
+        html += "    </table>\n"
+
     # Add shift breakdown table
     if shift_data:
         html += """
     <h2>🕐 Performance by Shift</h2>
     <table>
-        <tr><th>Shift</th><th>Received</th><th>Sent</th><th>Unique Users</th><th>Response %</th></tr>
+        <tr><th>Shift</th><th>Received</th><th>Sent</th><th>New Chats</th><th>Unique Users</th><th>Response %</th></tr>
 """
         for row in shift_data:
             resp_pct = f"{row[5]:.1f}%" if row[5] else "N/A"
-            html += f"        <tr><td>{row[0]}</td><td>{row[1]:,}</td><td>{row[2]:,}</td><td>{row[4]:,}</td><td>{resp_pct}</td></tr>\n"
+            html += f"        <tr><td>{row[0]}</td><td>{row[1]:,}</td><td>{row[2]:,}</td><td>{row[3]:,}</td><td>{row[4]:,}</td><td>{resp_pct}</td></tr>\n"
         html += "    </table>\n"
-    
+
     # Add top pages table
     if page_data:
         html += """
     <h2>📄 Top Pages Performance</h2>
     <table>
-        <tr><th>Page</th><th>Received</th><th>Sent</th><th>Unique Users</th></tr>
+        <tr><th>Page</th><th>Received</th><th>Sent</th><th>New Chats</th><th>Unique Users</th></tr>
 """
         for row in page_data:
-            html += f"        <tr><td>{row[0]}</td><td>{row[1]:,}</td><td>{row[2]:,}</td><td>{row[4]:,}</td></tr>\n"
+            html += f"        <tr><td>{row[0]}</td><td>{row[1]:,}</td><td>{row[2]:,}</td><td>{row[3]:,}</td><td>{row[4]:,}</td></tr>\n"
         html += "    </table>\n"
     
     html += """
