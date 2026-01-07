@@ -162,7 +162,7 @@ cur.execute("""
         s.comment_replies as "Comments",
         CASE WHEN s.messages_received > 0 
              THEN ROUND(100.0 * s.messages_sent / s.messages_received, 1)
-             ELSE 0 END as "Response %"
+             ELSE 0 END as "Response %%"
     FROM agent_daily_stats s
     JOIN agents a ON s.agent_id = a.id
     WHERE s.date BETWEEN %s AND %s
