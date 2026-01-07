@@ -105,18 +105,28 @@ st.markdown("---")
 conn = get_connection()
 cur = conn.cursor()
 
-# Messages summary with unique users
+# Messages summary with unique users and new chats (first-time users)
 cur.execute("""
+    WITH first_messages AS (
+        SELECT sender_id, MIN(message_time) as first_msg_time
+        FROM messages
+        WHERE is_from_page = false
+        GROUP BY sender_id
+    )
     SELECT
-        COUNT(*) FILTER (WHERE is_from_page = false) as recv,
-        COUNT(*) FILTER (WHERE is_from_page = true) as sent,
-        COUNT(DISTINCT conversation_id) FILTER (WHERE is_from_page = false) as new_convos,
-        COUNT(DISTINCT sender_id) FILTER (WHERE is_from_page = false) as unique_users
-    FROM messages
-    WHERE (message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
-""", (from_date, to_date))
+        COUNT(*) FILTER (WHERE m.is_from_page = false) as recv,
+        COUNT(*) FILTER (WHERE m.is_from_page = true) as sent,
+        COUNT(DISTINCT m.sender_id) FILTER (WHERE m.is_from_page = false) as unique_users,
+        COUNT(DISTINCT CASE
+            WHEN (fm.first_msg_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+            THEN m.sender_id
+        END) as new_chats
+    FROM messages m
+    LEFT JOIN first_messages fm ON m.sender_id = fm.sender_id
+    WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+""", (from_date, to_date, from_date, to_date))
 msg_row = cur.fetchone()
-msg_recv, msg_sent, new_convos, unique_users = msg_row if msg_row else (0, 0, 0, 0)
+msg_recv, msg_sent, unique_users, new_chats = msg_row if msg_row else (0, 0, 0, 0)
 
 # Comments summary (removed Comments Received)
 cur.execute("""
@@ -142,7 +152,7 @@ with col2:
 with col3:
     st.metric("👥 Unique Users", f"{unique_users:,}")
 with col4:
-    st.metric("💬 New Conversations", f"{new_convos:,}")
+    st.metric("🆕 New Chats", f"{new_chats:,}")
 with col5:
     st.metric("📊 Response Rate", f"{response_rate:.1f}%")
 with col6:
@@ -366,24 +376,34 @@ st.markdown("---")
 st.subheader("🕐 Performance by Shift")
 
 cur.execute("""
-    WITH msg_shift AS (
+    WITH first_messages AS (
+        SELECT sender_id, MIN(message_time) as first_msg_time
+        FROM messages
+        WHERE is_from_page = false
+        GROUP BY sender_id
+    ),
+    msg_shift AS (
         SELECT
-            is_from_page,
-            conversation_id,
-            sender_id,
+            m.is_from_page,
+            m.sender_id,
+            fm.first_msg_time,
             CASE
-                WHEN EXTRACT(HOUR FROM (message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13 THEN 'Morning (6am-2pm)'
-                WHEN EXTRACT(HOUR FROM (message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21 THEN 'Mid (2pm-10pm)'
+                WHEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13 THEN 'Morning (6am-2pm)'
+                WHEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21 THEN 'Mid (2pm-10pm)'
                 ELSE 'Evening (10pm-6am)'
             END as shift
-        FROM messages
-        WHERE (message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+        FROM messages m
+        LEFT JOIN first_messages fm ON m.sender_id = fm.sender_id
+        WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
     )
     SELECT
         shift,
         COUNT(*) FILTER (WHERE is_from_page = false) as received,
         COUNT(*) FILTER (WHERE is_from_page = true) as sent,
-        COUNT(DISTINCT conversation_id) FILTER (WHERE is_from_page = false) as new_chats,
+        COUNT(DISTINCT CASE
+            WHEN (first_msg_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+            THEN sender_id
+        END) as new_chats,
         COUNT(DISTINCT sender_id) FILTER (WHERE is_from_page = false) as unique_users,
         ROUND(100.0 * COUNT(*) FILTER (WHERE is_from_page = true) / NULLIF(COUNT(*) FILTER (WHERE is_from_page = false), 0), 1) as response_rate
     FROM msg_shift
@@ -393,7 +413,7 @@ cur.execute("""
         WHEN 'Mid (2pm-10pm)' THEN 2
         ELSE 3
     END
-""", (from_date, to_date))
+""", (from_date, to_date, from_date, to_date))
 shift_data = cur.fetchall()
 
 if shift_data:
@@ -430,20 +450,30 @@ st.markdown("---")
 st.subheader("📄 Top Pages Performance")
 
 cur.execute("""
+    WITH first_messages AS (
+        SELECT sender_id, MIN(message_time) as first_msg_time
+        FROM messages
+        WHERE is_from_page = false
+        GROUP BY sender_id
+    )
     SELECT
         p.page_name,
         COUNT(*) FILTER (WHERE m.is_from_page = false) as received,
         COUNT(*) FILTER (WHERE m.is_from_page = true) as sent,
-        COUNT(DISTINCT m.conversation_id) FILTER (WHERE m.is_from_page = false) as new_chats,
+        COUNT(DISTINCT CASE
+            WHEN (fm.first_msg_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+            THEN m.sender_id
+        END) as new_chats,
         COUNT(DISTINCT m.sender_id) FILTER (WHERE m.is_from_page = false) as unique_users
     FROM messages m
     JOIN pages p ON m.page_id = p.page_id
+    LEFT JOIN first_messages fm ON m.sender_id = fm.sender_id
     WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
     GROUP BY p.page_name
     HAVING COUNT(*) FILTER (WHERE m.is_from_page = false) > 0
     ORDER BY received DESC
     LIMIT 10
-""", (from_date, to_date))
+""", (from_date, to_date, from_date, to_date))
 page_data = cur.fetchall()
 
 if page_data:
@@ -522,8 +552,8 @@ else:
 # EXPORT FUNCTIONALITY (in sidebar)
 # ============================================
 export_data = {
-    'Metric': ['Messages Received', 'Messages Sent', 'Unique Users', 'New Conversations', 'Response Rate', 'Page Comments'],
-    'Value': [msg_recv, msg_sent, unique_users, new_convos, f"{response_rate:.1f}%", cmt_reply]
+    'Metric': ['Messages Received', 'Messages Sent', 'Unique Users', 'New Chats', 'Response Rate', 'Page Comments'],
+    'Value': [msg_recv, msg_sent, unique_users, new_chats, f"{response_rate:.1f}%", cmt_reply]
 }
 export_df = pd.DataFrame(export_data)
 
@@ -606,8 +636,8 @@ def generate_html_report():
             <div class="metric-label">👥 Unique Users</div>
         </div>
         <div class="metric-card">
-            <div class="metric-value">{new_convos:,}</div>
-            <div class="metric-label">💬 New Conversations</div>
+            <div class="metric-value">{new_chats:,}</div>
+            <div class="metric-label">🆕 New Chats</div>
         </div>
         <div class="metric-card">
             <div class="metric-value">{response_rate:.1f}%</div>
@@ -700,8 +730,8 @@ st.caption("""
 **Metric Definitions:**
 - **Messages Received**: Incoming messages from users
 - **Messages Sent**: Outgoing replies from page
-- **Unique Users**: Distinct users who sent messages
-- **New Conversations**: Active conversation threads on the day
+- **Unique Users**: Distinct users who sent messages (including returning)
+- **New Chats**: First-time users (never messaged before)
 - **Page Comments**: Comments posted by the page (replies to users)
 - **Response Rate**: Messages Sent / Messages Received x 100%
 """)
