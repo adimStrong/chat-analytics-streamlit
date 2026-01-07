@@ -86,11 +86,15 @@ with st.sidebar:
 # ============================================
 # TITLE (After date selection so it updates)
 # ============================================
-st.title("📊 T+1 Daily Report")
-if use_date_range:
-    st.markdown(f"### Report Period: **{date_label}**")
-else:
-    st.markdown(f"### Report Date: **{date_label}**")
+col_logo, col_title = st.columns([1, 5])
+with col_logo:
+    st.image("Juan365.jpg", width=80)
+with col_title:
+    st.title("Daily Report")
+    if use_date_range:
+        st.markdown(f"**Report Period: {date_label}**")
+    else:
+        st.markdown(f"**Report Date: {date_label}**")
 st.caption(f"Generated on: {today.strftime('%B %d, %Y')} | All times in Philippine Time (UTC+8)")
 
 st.markdown("---")
@@ -151,6 +155,25 @@ st.markdown("---")
 # ============================================
 st.subheader("👥 SMA Member Performance")
 
+# Helper function to format response time
+def format_rt(seconds):
+    """Format response time in seconds to human readable format"""
+    if pd.isna(seconds) or seconds is None or seconds == 0:
+        return "-"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{mins}m {secs}s"
+    else:
+        hrs = int(seconds // 3600)
+        mins = int((seconds % 3600) // 60)
+        return f"{hrs}h {mins}m"
+
+# Calculate total days in date range
+total_days_in_range = (to_date - from_date).days + 1
+
 cur.execute("""
     WITH agent_pages AS (
         SELECT DISTINCT a.id as agent_id, a.agent_name, apa.page_id, apa.shift
@@ -178,16 +201,44 @@ cur.execute("""
         SELECT
             ap.agent_name,
             ap.shift,
-            COUNT(DISTINCT ss.conversation_id) as unique_users
+            COUNT(DISTINCT m.sender_id) as unique_users
+        FROM agent_pages ap
+        JOIN messages m ON ap.page_id = m.page_id
+        WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+          AND m.is_from_page = false
+          AND CASE ap.shift
+              WHEN 'Morning' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
+              WHEN 'Mid' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
+              ELSE EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
+          END
+        GROUP BY ap.agent_name, ap.shift
+    ),
+    human_rt AS (
+        SELECT
+            ap.agent_name,
+            ap.shift,
+            AVG(ss.avg_response_time_seconds) as human_response_time
         FROM agent_pages ap
         JOIN sessions ss ON ap.page_id = ss.page_id
         WHERE (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+          AND ss.avg_response_time_seconds > 0
           AND CASE ap.shift
               WHEN 'Morning' THEN EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
               WHEN 'Mid' THEN EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
               ELSE EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
           END
         GROUP BY ap.agent_name, ap.shift
+    ),
+    attendance AS (
+        SELECT
+            a.agent_name,
+            s.shift,
+            COUNT(*) FILTER (WHERE s.schedule_status = 'present') as days_present,
+            COUNT(*) as total_scheduled_days
+        FROM agent_daily_stats s
+        JOIN agents a ON s.agent_id = a.id
+        WHERE s.date BETWEEN %s AND %s
+        GROUP BY a.agent_name, s.shift
     )
     SELECT
         a.agent_name as "Agent",
@@ -196,17 +247,24 @@ cur.execute("""
         s.duty_hours as "Hours",
         COALESCE(nc.new_chats, 0) as "New Chats",
         COALESCE(uu.unique_users, 0) as "Unique Users",
-        s.messages_received as "Msg Recv",
-        s.messages_sent as "Msg Sent",
-        s.comment_replies as "Comments",
-        CASE WHEN s.messages_received > 0
-             THEN ROUND(100.0 * s.messages_sent / s.messages_received, 1)
-             ELSE 0 END as "Response %%"
+        SUM(s.messages_received) as "Msg Recv",
+        SUM(s.messages_sent) as "Msg Sent",
+        SUM(s.comment_replies) as "Comments",
+        CASE WHEN SUM(s.messages_received) > 0
+             THEN ROUND(100.0 * SUM(s.messages_sent) / SUM(s.messages_received), 1)
+             ELSE 0 END as "Response %%",
+        ROUND(AVG(s.avg_response_time_seconds)::numeric, 1) as "Avg RT",
+        ROUND(AVG(hrt.human_response_time)::numeric, 1) as "Human RT",
+        COALESCE(att.days_present, 0) as "Days Present",
+        COALESCE(att.total_scheduled_days, 0) as "Total Days"
     FROM agent_daily_stats s
     JOIN agents a ON s.agent_id = a.id
     LEFT JOIN new_chats nc ON a.agent_name = nc.agent_name AND s.shift = nc.shift
     LEFT JOIN unique_users uu ON a.agent_name = uu.agent_name AND s.shift = uu.shift
+    LEFT JOIN human_rt hrt ON a.agent_name = hrt.agent_name AND s.shift = hrt.shift
+    LEFT JOIN attendance att ON a.agent_name = att.agent_name AND s.shift = att.shift
     WHERE s.date BETWEEN %s AND %s
+    GROUP BY a.agent_name, s.shift, s.schedule_status, s.duty_hours, nc.new_chats, uu.unique_users, hrt.human_response_time, att.days_present, att.total_scheduled_days
     ORDER BY
         CASE s.shift
             WHEN 'Morning' THEN 1
@@ -214,12 +272,12 @@ cur.execute("""
             ELSE 3
         END,
         a.agent_name
-""", (from_date, to_date, from_date, to_date, from_date, to_date))
+""", (from_date, to_date, from_date, to_date, from_date, to_date, from_date, to_date, from_date, to_date))
 sma_data = cur.fetchall()
 
 if sma_data:
-    sma_df = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %'])
-    
+    sma_df = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %', 'Avg RT', 'Human RT', 'Days Present', 'Total Days'])
+
     # Color code by status
     def style_status(val):
         if val == 'present':
@@ -229,21 +287,23 @@ if sma_data:
         elif val == 'off':
             return 'background-color: #f3f4f6; color: #4b5563'  # gray
         return ''
-    
+
     sma_display = sma_df.copy()
-    for col in ['New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments']:
+    for col in ['New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments', 'Days Present', 'Total Days']:
         sma_display[col] = sma_display[col].apply(format_number)
     sma_display['Response %'] = sma_display['Response %'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
-    
-    col1, col2 = st.columns([2, 1])
-    
+    sma_display['Avg RT'] = sma_df['Avg RT'].apply(format_rt)
+    sma_display['Human RT'] = sma_df['Human RT'].apply(format_rt)
+
+    col1, col2 = st.columns([3, 1])
+
     with col1:
         st.dataframe(
             sma_display.style.applymap(style_status, subset=['Status']),
             hide_index=True,
             use_container_width=True
         )
-    
+
     with col2:
         # Summary by status
         status_counts = sma_df['Status'].value_counts()
@@ -251,7 +311,7 @@ if sma_data:
         for status, count in status_counts.items():
             emoji = "✅" if status == 'present' else "❌" if status == 'absent' else "⏸️" if status == 'off' else "❓"
             st.markdown(f"{emoji} {status.title()}: **{count}**")
-        
+
         # Total metrics for present agents
         present_df = sma_df[sma_df['Status'] == 'present']
         if not present_df.empty:
@@ -260,6 +320,18 @@ if sma_data:
             st.markdown(f"📥 Msg Recv: **{present_df['Msg Recv'].sum():,}**")
             st.markdown(f"📤 Msg Sent: **{present_df['Msg Sent'].sum():,}**")
             st.markdown(f"💬 Comments: **{present_df['Comments'].sum():,}**")
+
+    # Explanation of columns
+    st.markdown("---")
+    with st.expander("ℹ️ Column Definitions"):
+        st.markdown("""
+        | Column | Description |
+        |--------|-------------|
+        | **Avg RT** | Average Response Time - overall average time to respond to messages (includes automated) |
+        | **Human RT** | Human Response Time - average response time from conversation sessions (excludes instant/automated) |
+        | **Days Present** | Number of days the agent was marked as "present" in the date range |
+        | **Total Days** | Total scheduled days for the agent in the date range |
+        """)
 else:
     st.info("No SMA schedule data for selected date. Schedule may not be synced yet.")
 
@@ -441,7 +513,7 @@ csv_buffer.write("\n")
 
 if sma_data:
     csv_buffer.write("SMA MEMBER PERFORMANCE\n")
-    sma_export = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %'])
+    sma_export = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %', 'Avg RT (s)', 'Human RT (s)', 'Days Present', 'Total Days'])
     sma_export.to_csv(csv_buffer, index=False)
     csv_buffer.write("\n")
 
@@ -466,19 +538,21 @@ def generate_html_report():
     html = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>T+1 Daily Report - {date_label}</title>
+    <title>Juan365 Daily Report - {date_label}</title>
     <style>
-        body {{ font-family: Arial, sans-serif; padding: 20px; max-width: 1000px; margin: 0 auto; }}
+        body {{ font-family: Arial, sans-serif; padding: 20px; max-width: 1100px; margin: 0 auto; }}
         h1 {{ color: #1f2937; border-bottom: 2px solid #3B82F6; padding-bottom: 10px; }}
         h2 {{ color: #374151; margin-top: 30px; }}
-        .header {{ background: linear-gradient(135deg, #3B82F6, #10B981); color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }}
+        .header {{ background: linear-gradient(135deg, #3B82F6, #10B981); color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; display: flex; align-items: center; gap: 20px; }}
+        .header img {{ width: 60px; height: 60px; border-radius: 8px; }}
         .header h1 {{ color: white; border: none; margin: 0; }}
+        .header-text {{ flex: 1; }}
         .summary-grid {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 15px; margin: 20px 0; }}
         .metric-card {{ background: #f3f4f6; padding: 15px; border-radius: 8px; text-align: center; }}
         .metric-value {{ font-size: 24px; font-weight: bold; color: #1f2937; }}
         .metric-label {{ font-size: 12px; color: #6b7280; margin-top: 5px; }}
-        table {{ width: 100%; border-collapse: collapse; margin: 15px 0; }}
-        th, td {{ border: 1px solid #e5e7eb; padding: 10px; text-align: left; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 13px; }}
+        th, td {{ border: 1px solid #e5e7eb; padding: 8px; text-align: left; }}
         th {{ background: #f9fafb; font-weight: 600; }}
         tr:nth-child(even) {{ background: #f9fafb; }}
         .footer {{ margin-top: 30px; padding-top: 15px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; }}
@@ -487,9 +561,11 @@ def generate_html_report():
 </head>
 <body>
     <div class="header">
-        <h1>📊 T+1 Daily Report</h1>
-        <p>Report Date: {date_label}</p>
-        <p>Generated: {today.strftime('%B %d, %Y')}</p>
+        <div class="header-text">
+            <h1>📊 Juan365 Daily Report</h1>
+            <p>Report Date: {date_label}</p>
+            <p>Generated: {today.strftime('%B %d, %Y')}</p>
+        </div>
     </div>
     
     <h2>📈 Daily Summary</h2>
@@ -526,12 +602,15 @@ def generate_html_report():
         html += """
     <h2>👥 SMA Member Performance</h2>
     <table>
-        <tr><th>Agent</th><th>Shift</th><th>Status</th><th>Hours</th><th>New Chats</th><th>Unique Users</th><th>Msg Recv</th><th>Msg Sent</th><th>Comments</th><th>Response %</th></tr>
+        <tr><th>Agent</th><th>Shift</th><th>Status</th><th>Hours</th><th>New Chats</th><th>Unique Users</th><th>Msg Recv</th><th>Msg Sent</th><th>Comments</th><th>Response %</th><th>Avg RT</th><th>Human RT</th><th>Days</th></tr>
 """
         for row in sma_data:
             status_style = 'background:#d1fae5' if row[2]=='present' else 'background:#fee2e2' if row[2]=='absent' else 'background:#f3f4f6'
             resp_pct = f"{row[9]:.1f}%" if row[9] else "N/A"
-            html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td style='{status_style}'>{row[2]}</td><td>{row[3] or '-'}</td><td>{row[4]:,}</td><td>{row[5]:,}</td><td>{row[6]:,}</td><td>{row[7]:,}</td><td>{row[8]:,}</td><td>{resp_pct}</td></tr>\n"
+            avg_rt = format_rt(row[10]) if row[10] else "-"
+            human_rt = format_rt(row[11]) if row[11] else "-"
+            days_display = f"{row[12]}/{row[13]}" if row[12] is not None and row[13] is not None else "-"
+            html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td style='{status_style}'>{row[2]}</td><td>{row[3] or '-'}</td><td>{row[4]:,}</td><td>{row[5]:,}</td><td>{row[6]:,}</td><td>{row[7]:,}</td><td>{row[8]:,}</td><td>{resp_pct}</td><td>{avg_rt}</td><td>{human_rt}</td><td>{days_display}</td></tr>\n"
         html += "    </table>\n"
     
     # Add shift breakdown table
