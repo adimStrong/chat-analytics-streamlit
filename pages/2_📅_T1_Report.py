@@ -664,7 +664,23 @@ def generate_html_report():
         th {{ background: #f9fafb; font-weight: 600; }}
         tr:nth-child(even) {{ background: #f9fafb; }}
         .footer {{ margin-top: 30px; padding-top: 15px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; }}
-        @media print {{ body {{ padding: 10px; }} .header {{ background: #3B82F6 !important; -webkit-print-color-adjust: exact; }} }}
+        /* Chart styles */
+        .chart-container {{ margin: 20px 0; }}
+        .bar-chart {{ display: flex; flex-direction: column; gap: 8px; }}
+        .bar-row {{ display: flex; align-items: center; gap: 10px; }}
+        .bar-label {{ width: 120px; font-size: 12px; text-align: right; }}
+        .bar-wrapper {{ flex: 1; display: flex; gap: 4px; align-items: center; }}
+        .bar {{ height: 24px; border-radius: 4px; display: flex; align-items: center; justify-content: flex-end; padding-right: 6px; color: white; font-size: 11px; font-weight: bold; min-width: 30px; }}
+        .bar-recv {{ background: #3B82F6; }}
+        .bar-sent {{ background: #10B981; }}
+        .chart-legend {{ display: flex; gap: 20px; margin-top: 10px; font-size: 12px; }}
+        .legend-item {{ display: flex; align-items: center; gap: 5px; }}
+        .legend-color {{ width: 16px; height: 16px; border-radius: 3px; }}
+        .hourly-chart {{ display: flex; align-items: flex-end; gap: 2px; height: 120px; border-bottom: 1px solid #e5e7eb; padding-bottom: 5px; }}
+        .hourly-bar {{ display: flex; flex-direction: column; align-items: center; gap: 2px; }}
+        .hourly-bar-inner {{ width: 18px; border-radius: 2px 2px 0 0; }}
+        .hourly-label {{ font-size: 9px; color: #6b7280; }}
+        @media print {{ body {{ padding: 10px; }} .header {{ background: #3B82F6 !important; -webkit-print-color-adjust: exact; }} .bar, .legend-color, .hourly-bar-inner {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} }}
     </style>
 </head>
 <body>
@@ -732,7 +748,7 @@ def generate_html_report():
             html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td><td>{row[3]:,}</td><td>{row[4]:,}</td><td>{row[5]:,}</td></tr>\n"
         html += "    </table>\n"
 
-    # Add shift breakdown table
+    # Add shift breakdown table with chart
     if shift_data:
         html += """
     <h2>🕐 Performance by Shift</h2>
@@ -744,7 +760,17 @@ def generate_html_report():
             html += f"        <tr><td>{row[0]}</td><td>{row[1]:,}</td><td>{row[2]:,}</td><td>{row[3]:,}</td><td>{row[4]:,}</td><td>{resp_pct}</td></tr>\n"
         html += "    </table>\n"
 
-    # Add top pages table
+        # Add shift bar chart
+        max_shift_val = max(row[1] for row in shift_data) if shift_data else 1
+        html += '    <div class="chart-container"><div class="bar-chart">\n'
+        for row in shift_data:
+            recv_width = int((row[1] / max_shift_val) * 200) if max_shift_val > 0 else 0
+            sent_width = int((row[2] / max_shift_val) * 200) if max_shift_val > 0 else 0
+            html += f'        <div class="bar-row"><div class="bar-label">{row[0][:15]}</div><div class="bar-wrapper"><div class="bar bar-recv" style="width:{recv_width}px">{row[1]:,}</div><div class="bar bar-sent" style="width:{sent_width}px">{row[2]:,}</div></div></div>\n'
+        html += '    </div>\n'
+        html += '    <div class="chart-legend"><div class="legend-item"><div class="legend-color" style="background:#3B82F6"></div>Received</div><div class="legend-item"><div class="legend-color" style="background:#10B981"></div>Sent</div></div></div>\n'
+
+    # Add top pages table with chart
     if page_data:
         html += """
     <h2>📄 Top Pages Performance</h2>
@@ -754,7 +780,28 @@ def generate_html_report():
         for row in page_data:
             html += f"        <tr><td>{row[0]}</td><td>{row[1]:,}</td><td>{row[2]:,}</td><td>{row[3]:,}</td><td>{row[4]:,}</td></tr>\n"
         html += "    </table>\n"
-    
+
+        # Add top pages bar chart (top 5)
+        top_pages = page_data[:5]
+        max_page_val = max(row[1] for row in top_pages) if top_pages else 1
+        html += '    <div class="chart-container"><div class="bar-chart">\n'
+        for row in top_pages:
+            recv_width = int((row[1] / max_page_val) * 250) if max_page_val > 0 else 0
+            html += f'        <div class="bar-row"><div class="bar-label">{row[0][:15]}</div><div class="bar-wrapper"><div class="bar bar-recv" style="width:{recv_width}px">{row[1]:,}</div></div></div>\n'
+        html += '    </div></div>\n'
+
+    # Add hourly trend chart
+    if hourly_data:
+        html += '    <h2>⏰ Hourly Message Trend</h2>\n'
+        max_hourly = max(row[1] for row in hourly_data) if hourly_data else 1
+        html += '    <div class="chart-container"><div class="hourly-chart">\n'
+        for row in hourly_data:
+            recv_height = int((row[1] / max_hourly) * 100) if max_hourly > 0 else 0
+            sent_height = int((row[2] / max_hourly) * 100) if max_hourly > 0 else 0
+            html += f'        <div class="hourly-bar"><div class="hourly-bar-inner bar-recv" style="height:{recv_height}px"></div><div class="hourly-bar-inner bar-sent" style="height:{sent_height}px"></div><div class="hourly-label">{row[0]:02d}</div></div>\n'
+        html += '    </div>\n'
+        html += '    <div class="chart-legend"><div class="legend-item"><div class="legend-color" style="background:#3B82F6"></div>Received</div><div class="legend-item"><div class="legend-color" style="background:#10B981"></div>Sent</div></div></div>\n'
+
     html += """
     <div class="footer">
         <p><strong>How to save as PDF:</strong> Press Ctrl+P (or Cmd+P on Mac) → Select "Save as PDF" as destination</p>
