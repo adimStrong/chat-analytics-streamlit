@@ -152,32 +152,73 @@ st.markdown("---")
 st.subheader("👥 SMA Member Performance")
 
 cur.execute("""
-    SELECT 
+    WITH agent_pages AS (
+        SELECT DISTINCT a.id as agent_id, a.agent_name, apa.page_id, apa.shift
+        FROM agents a
+        JOIN agent_page_assignments apa ON a.id = apa.agent_id
+        WHERE a.is_active = true AND apa.is_active = true
+    ),
+    new_chats AS (
+        SELECT
+            ap.agent_name,
+            ap.shift,
+            COUNT(DISTINCT m.conversation_id) as new_chats
+        FROM agent_pages ap
+        JOIN messages m ON ap.page_id = m.page_id
+        WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+          AND m.is_from_page = false
+          AND CASE ap.shift
+              WHEN 'Morning' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
+              WHEN 'Mid' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
+              ELSE EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
+          END
+        GROUP BY ap.agent_name, ap.shift
+    ),
+    unique_users AS (
+        SELECT
+            ap.agent_name,
+            ap.shift,
+            COUNT(DISTINCT ss.conversation_id) as unique_users
+        FROM agent_pages ap
+        JOIN sessions ss ON ap.page_id = ss.page_id
+        WHERE (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+          AND CASE ap.shift
+              WHEN 'Morning' THEN EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
+              WHEN 'Mid' THEN EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
+              ELSE EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
+          END
+        GROUP BY ap.agent_name, ap.shift
+    )
+    SELECT
         a.agent_name as "Agent",
         s.shift as "Shift",
         s.schedule_status as "Status",
         s.duty_hours as "Hours",
+        COALESCE(nc.new_chats, 0) as "New Chats",
+        COALESCE(uu.unique_users, 0) as "Unique Users",
         s.messages_received as "Msg Recv",
         s.messages_sent as "Msg Sent",
         s.comment_replies as "Comments",
-        CASE WHEN s.messages_received > 0 
+        CASE WHEN s.messages_received > 0
              THEN ROUND(100.0 * s.messages_sent / s.messages_received, 1)
              ELSE 0 END as "Response %%"
     FROM agent_daily_stats s
     JOIN agents a ON s.agent_id = a.id
+    LEFT JOIN new_chats nc ON a.agent_name = nc.agent_name AND s.shift = nc.shift
+    LEFT JOIN unique_users uu ON a.agent_name = uu.agent_name AND s.shift = uu.shift
     WHERE s.date BETWEEN %s AND %s
-    ORDER BY 
-        CASE s.shift 
-            WHEN 'Morning' THEN 1 
-            WHEN 'Mid' THEN 2 
-            ELSE 3 
+    ORDER BY
+        CASE s.shift
+            WHEN 'Morning' THEN 1
+            WHEN 'Mid' THEN 2
+            ELSE 3
         END,
         a.agent_name
-""", (from_date, to_date))
+""", (from_date, to_date, from_date, to_date, from_date, to_date))
 sma_data = cur.fetchall()
 
 if sma_data:
-    sma_df = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %'])
+    sma_df = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %'])
     
     # Color code by status
     def style_status(val):
@@ -190,7 +231,7 @@ if sma_data:
         return ''
     
     sma_display = sma_df.copy()
-    for col in ['Msg Recv', 'Msg Sent', 'Comments']:
+    for col in ['New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments']:
         sma_display[col] = sma_display[col].apply(format_number)
     sma_display['Response %'] = sma_display['Response %'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
     
@@ -400,7 +441,7 @@ csv_buffer.write("\n")
 
 if sma_data:
     csv_buffer.write("SMA MEMBER PERFORMANCE\n")
-    sma_export = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %'])
+    sma_export = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %'])
     sma_export.to_csv(csv_buffer, index=False)
     csv_buffer.write("\n")
 
@@ -485,12 +526,12 @@ def generate_html_report():
         html += """
     <h2>👥 SMA Member Performance</h2>
     <table>
-        <tr><th>Agent</th><th>Shift</th><th>Status</th><th>Hours</th><th>Msg Recv</th><th>Msg Sent</th><th>Comments</th><th>Response %</th></tr>
+        <tr><th>Agent</th><th>Shift</th><th>Status</th><th>Hours</th><th>New Chats</th><th>Unique Users</th><th>Msg Recv</th><th>Msg Sent</th><th>Comments</th><th>Response %</th></tr>
 """
         for row in sma_data:
             status_style = 'background:#d1fae5' if row[2]=='present' else 'background:#fee2e2' if row[2]=='absent' else 'background:#f3f4f6'
-            resp_pct = f"{row[7]:.1f}%" if row[7] else "N/A"
-            html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td style='{status_style}'>{row[2]}</td><td>{row[3] or '-'}</td><td>{row[4]:,}</td><td>{row[5]:,}</td><td>{row[6]:,}</td><td>{resp_pct}</td></tr>\n"
+            resp_pct = f"{row[9]:.1f}%" if row[9] else "N/A"
+            html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td style='{status_style}'>{row[2]}</td><td>{row[3] or '-'}</td><td>{row[4]:,}</td><td>{row[5]:,}</td><td>{row[6]:,}</td><td>{row[7]:,}</td><td>{row[8]:,}</td><td>{resp_pct}</td></tr>\n"
         html += "    </table>\n"
     
     # Add shift breakdown table

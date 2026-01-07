@@ -1042,7 +1042,13 @@ with tab3:
                     lambda x: f"{x/60:.1f}m" if x and x >= 60 else (f"{x:.0f}s" if x else "N/A")
                 )
                 # Rename for clarity
-                sma_display = sma_display.rename(columns={'Avg Human RT (s)': 'Human RT (excl bot)'})
+                sma_display = sma_display.rename(columns={'Avg Human RT (s)': 'Human RT'})
+
+            # Reorder columns: SMA, Shift, New Chats, Unique Users, Msg Recv, Msg Sent, Cmt Reply, Avg RT, Human RT, Days Present, Total Days
+            column_order = ['SMA', 'Shift', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Cmt Reply', 'Avg RT (s)', 'Human RT', 'Days Present', 'Total Days']
+            # Only include columns that exist
+            column_order = [col for col in column_order if col in sma_display.columns]
+            sma_display = sma_display[column_order]
 
             st.dataframe(sma_display, hide_index=True)
 
