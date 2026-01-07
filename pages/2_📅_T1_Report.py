@@ -399,12 +399,10 @@ export_df.to_csv(csv_buffer, index=False)
 csv_buffer.write("\n")
 
 if sma_data:
-    csv_buffer.write("SMA MEMBER PERFORMANCE
-")
+    csv_buffer.write("SMA MEMBER PERFORMANCE\n")
     sma_export = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %'])
     sma_export.to_csv(csv_buffer, index=False)
-    csv_buffer.write("
-")
+    csv_buffer.write("\n")
 
 if shift_data:
     csv_buffer.write("BY SHIFT\n")
@@ -492,10 +490,8 @@ def generate_html_report():
         for row in sma_data:
             status_style = 'background:#d1fae5' if row[2]=='present' else 'background:#fee2e2' if row[2]=='absent' else 'background:#f3f4f6'
             resp_pct = f"{row[7]:.1f}%" if row[7] else "N/A"
-            html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td style='{status_style}'>{row[2]}</td><td>{row[3] or '-'}</td><td>{row[4]:,}</td><td>{row[5]:,}</td><td>{row[6]:,}</td><td>{resp_pct}</td></tr>
-"
-        html += "    </table>
-"
+            html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td style='{status_style}'>{row[2]}</td><td>{row[3] or '-'}</td><td>{row[4]:,}</td><td>{row[5]:,}</td><td>{row[6]:,}</td><td>{resp_pct}</td></tr>\n"
+        html += "    </table>\n"
     
     # Add shift breakdown table
     if shift_data:
@@ -506,10 +502,8 @@ def generate_html_report():
 """
         for row in shift_data:
             resp_pct = f"{row[5]:.1f}%" if row[5] else "N/A"
-            html += f"        <tr><td>{row[0]}</td><td>{row[1]:,}</td><td>{row[2]:,}</td><td>{row[4]:,}</td><td>{resp_pct}</td></tr>
-"
-        html += "    </table>
-"
+            html += f"        <tr><td>{row[0]}</td><td>{row[1]:,}</td><td>{row[2]:,}</td><td>{row[4]:,}</td><td>{resp_pct}</td></tr>\n"
+        html += "    </table>\n"
     
     # Add top pages table
     if page_data:
@@ -519,10 +513,8 @@ def generate_html_report():
         <tr><th>Page</th><th>Received</th><th>Sent</th><th>Unique Users</th></tr>
 """
         for row in page_data:
-            html += f"        <tr><td>{row[0]}</td><td>{row[1]:,}</td><td>{row[2]:,}</td><td>{row[4]:,}</td></tr>
-"
-        html += "    </table>
-"
+            html += f"        <tr><td>{row[0]}</td><td>{row[1]:,}</td><td>{row[2]:,}</td><td>{row[4]:,}</td></tr>\n"
+        html += "    </table>\n"
     
     html += """
     <div class="footer">
