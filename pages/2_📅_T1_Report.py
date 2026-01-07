@@ -181,15 +181,25 @@ cur.execute("""
         JOIN agent_page_assignments apa ON a.id = apa.agent_id
         WHERE a.is_active = true AND apa.is_active = true
     ),
+    -- First message ever per sender (to identify new users)
+    first_messages AS (
+        SELECT sender_id, MIN(message_time) as first_msg_time
+        FROM messages
+        WHERE is_from_page = false
+        GROUP BY sender_id
+    ),
+    -- New chats = first-time users (their first message ever is within the date range)
     new_chats AS (
         SELECT
             ap.agent_name,
             ap.shift,
-            COUNT(DISTINCT m.conversation_id) as new_chats
+            COUNT(DISTINCT m.sender_id) as new_chats
         FROM agent_pages ap
         JOIN messages m ON ap.page_id = m.page_id
+        JOIN first_messages fm ON m.sender_id = fm.sender_id
         WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
           AND m.is_from_page = false
+          AND (fm.first_msg_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
           AND CASE ap.shift
               WHEN 'Morning' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
               WHEN 'Mid' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
@@ -197,6 +207,7 @@ cur.execute("""
           END
         GROUP BY ap.agent_name, ap.shift
     ),
+    -- Unique users = all distinct users who messaged (including returning)
     unique_users AS (
         SELECT
             ap.agent_name,
@@ -245,16 +256,16 @@ cur.execute("""
         s.shift as "Shift",
         s.schedule_status as "Status",
         s.duty_hours as "Hours",
-        COALESCE(nc.new_chats, 0) as "New Chats",
-        COALESCE(uu.unique_users, 0) as "Unique Users",
-        SUM(s.messages_received) as "Msg Recv",
-        SUM(s.messages_sent) as "Msg Sent",
-        SUM(s.comment_replies) as "Comments",
-        CASE WHEN SUM(s.messages_received) > 0
-             THEN ROUND(100.0 * SUM(s.messages_sent) / SUM(s.messages_received), 1)
+        CASE WHEN s.schedule_status = 'off' THEN 0 ELSE COALESCE(nc.new_chats, 0) END as "New Chats",
+        CASE WHEN s.schedule_status = 'off' THEN 0 ELSE COALESCE(uu.unique_users, 0) END as "Unique Users",
+        CASE WHEN s.schedule_status = 'off' THEN 0 ELSE SUM(s.messages_received) END as "Msg Recv",
+        CASE WHEN s.schedule_status = 'off' THEN 0 ELSE SUM(s.messages_sent) END as "Msg Sent",
+        CASE WHEN s.schedule_status = 'off' THEN 0 ELSE SUM(s.comment_replies) END as "Comments",
+        CASE WHEN s.schedule_status = 'off' THEN 0
+             WHEN SUM(s.messages_received) > 0 THEN ROUND(100.0 * SUM(s.messages_sent) / SUM(s.messages_received), 1)
              ELSE 0 END as "Response %%",
-        ROUND(AVG(s.avg_response_time_seconds)::numeric, 1) as "Avg RT",
-        ROUND(AVG(hrt.human_response_time)::numeric, 1) as "Human RT",
+        CASE WHEN s.schedule_status = 'off' THEN NULL ELSE ROUND(AVG(s.avg_response_time_seconds)::numeric, 1) END as "Avg RT",
+        CASE WHEN s.schedule_status = 'off' THEN NULL ELSE ROUND(AVG(hrt.human_response_time)::numeric, 1) END as "Human RT",
         COALESCE(att.days_present, 0) as "Days Present",
         COALESCE(att.total_scheduled_days, 0) as "Total Days"
     FROM agent_daily_stats s
@@ -272,7 +283,7 @@ cur.execute("""
             ELSE 3
         END,
         a.agent_name
-""", (from_date, to_date, from_date, to_date, from_date, to_date, from_date, to_date, from_date, to_date))
+""", (from_date, to_date, from_date, to_date, from_date, to_date, from_date, to_date, from_date, to_date, from_date, to_date))
 sma_data = cur.fetchall()
 
 if sma_data:
@@ -317,9 +328,17 @@ if sma_data:
         if not present_df.empty:
             st.markdown("---")
             st.markdown("**📈 Present Agents Total:**")
+            st.markdown(f"🆕 New Chats: **{present_df['New Chats'].sum():,}**")
+            st.markdown(f"👥 Unique Users: **{present_df['Unique Users'].sum():,}**")
             st.markdown(f"📥 Msg Recv: **{present_df['Msg Recv'].sum():,}**")
             st.markdown(f"📤 Msg Sent: **{present_df['Msg Sent'].sum():,}**")
             st.markdown(f"💬 Comments: **{present_df['Comments'].sum():,}**")
+            # Calculate average response times for present agents
+            avg_rt_mean = present_df['Avg RT'].dropna().mean()
+            human_rt_mean = present_df['Human RT'].dropna().mean()
+            st.markdown(f"⏱️ Avg RT: **{format_rt(avg_rt_mean)}**")
+            st.markdown(f"👤 Human RT: **{format_rt(human_rt_mean)}**")
+            st.markdown(f"📅 Days: **{int(present_df['Days Present'].sum())}/{int(present_df['Total Days'].sum())}**")
 
     # Explanation of columns
     st.markdown("---")
@@ -327,10 +346,14 @@ if sma_data:
         st.markdown("""
         | Column | Description |
         |--------|-------------|
+        | **New Chats** | First-time users who started a conversation (never messaged before) |
+        | **Unique Users** | All distinct users who messaged (including returning users) |
         | **Avg RT** | Average Response Time - overall average time to respond to messages (includes automated) |
         | **Human RT** | Human Response Time - average response time from conversation sessions (excludes instant/automated) |
         | **Days Present** | Number of days the agent was marked as "present" in the date range |
         | **Total Days** | Total scheduled days for the agent in the date range |
+
+        **Note:** When status is "off", all metrics show 0 since the agent was not working.
         """)
 else:
     st.info("No SMA schedule data for selected date. Schedule may not be synced yet.")
