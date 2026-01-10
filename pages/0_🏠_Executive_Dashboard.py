@@ -521,7 +521,7 @@ with col_chart:
             xaxis_title="",
             yaxis_title="Messages"
         )
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("No message data for selected period")
 

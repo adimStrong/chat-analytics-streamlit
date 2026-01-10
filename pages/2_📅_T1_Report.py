@@ -410,7 +410,7 @@ if sma_data:
         st.dataframe(
             sma_display.style.applymap(style_status, subset=['Status']),
             hide_index=True,
-            width="stretch"
+            use_container_width=True
         )
 
     with col2:
@@ -500,7 +500,7 @@ if page_matrix_data:
     for col in ['Msg Recv', 'Msg Sent', 'Unique Users']:
         page_matrix_display[col] = page_matrix_display[col].apply(format_number)
 
-    st.dataframe(page_matrix_display, hide_index=True, width="stretch")
+    st.dataframe(page_matrix_display, hide_index=True, use_container_width=True)
 
     with st.expander("ℹ️ About this table"):
         st.markdown("""
