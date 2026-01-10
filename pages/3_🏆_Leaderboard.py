@@ -579,13 +579,11 @@ with tab1:
     st.dataframe(
         display_df[display_cols],
         hide_index=True,
-        width="stretch",
+        use_container_width=True,
         column_config={
             "Score": st.column_config.NumberColumn(format="%.1f"),
             "RT Score": st.column_config.NumberColumn(format="%.1f"),
-            "Resolution %": st.column_config.NumberColumn(format="%.1f"),
-            "Productivity": st.column_config.NumberColumn(format="%.1f"),
-            "Unique Users": st.column_config.NumberColumn(format="%d")
+            "Productivity": st.column_config.NumberColumn(format="%.1f")
         }
     )
 
