@@ -1,6 +1,12 @@
 """
 Agent Leaderboard - Rankings and Performance Tiers
 Comprehensive agent performance scoring with multi-metric analysis
+
+Scoring System:
+- QA Score: 35% (based on response time quality thresholds)
+- Unique Users: 30% (unique conversations/users handled)
+- Response Time: 20% (average response time - lower is better)
+- Attendance: 15% (attendance rate)
 """
 
 import streamlit as st
@@ -25,11 +31,10 @@ st.set_page_config(
 # SCORING CONFIGURATION
 # ============================================
 SCORE_WEIGHTS = {
-    'response_rate': 0.30,      # 30% - Response rate percentage
-    'messages_handled': 0.25,    # 25% - Total messages handled
+    'qa_score': 0.35,            # 35% - QA Score (response time quality)
+    'unique_users': 0.30,        # 30% - Unique users/conversations handled
     'response_time': 0.20,       # 20% - Average response time (inverse - lower is better)
-    'attendance': 0.15,          # 15% - Attendance rate
-    'efficiency': 0.10           # 10% - Efficiency (sent vs received ratio)
+    'attendance': 0.15           # 15% - Attendance rate
 }
 
 TIER_THRESHOLDS = {
@@ -47,17 +52,26 @@ TIER_BADGES = {
     'standard': '📊'
 }
 
+# QA Score thresholds (based on response time)
+# Excellent: <5min, Good: 5-15min, Average: 15-30min, Poor: >30min
+QA_THRESHOLDS = {
+    'excellent': 300,    # 5 minutes
+    'good': 900,         # 15 minutes
+    'average': 1800,     # 30 minutes
+    'poor': 3600         # 60 minutes
+}
+
 # ============================================
 # DATA FUNCTIONS
 # ============================================
 
 @st.cache_data(ttl=CACHE_TTL["default"])
-def get_agent_stats(start_date, end_date, page_filter=None):
+def get_agent_stats(start_date, end_date):
     """Get comprehensive agent statistics for leaderboard"""
     conn = get_connection()
     cur = conn.cursor()
 
-    # Simple query using only columns that exist in agent_daily_stats
+    # Query with unique users (unique conversations)
     query = """
         WITH agent_metrics AS (
             SELECT
@@ -80,37 +94,48 @@ def get_agent_stats(start_date, end_date, page_filter=None):
             WHERE ads.date BETWEEN %s AND %s
               AND a.is_active = true
             GROUP BY a.id, a.agent_name
+        ),
+        unique_users AS (
+            SELECT
+                a.agent_name,
+                COUNT(DISTINCT c.participant_id) as unique_user_count
+            FROM agents a
+            JOIN agent_page_assignments apa ON a.id = apa.agent_id
+            JOIN conversations c ON c.page_id = apa.page_id
+            WHERE c.updated_time::date BETWEEN %s AND %s
+              AND a.is_active = true
+            GROUP BY a.agent_name
         )
         SELECT
-            agent_name,
-            total_recv,
-            total_sent,
-            CASE WHEN total_recv > 0 THEN ROUND((100.0 * total_sent / total_recv)::numeric, 1) ELSE 0 END as response_rate,
-            avg_rt,
-            days_present,
-            days_absent,
-            days_off,
-            total_days,
-            CASE WHEN (days_present + days_absent) > 0
-                THEN ROUND((100.0 * days_present / (days_present + days_absent))::numeric, 1)
+            am.agent_name,
+            am.total_recv,
+            am.total_sent,
+            am.avg_rt,
+            am.days_present,
+            am.days_absent,
+            am.days_off,
+            am.total_days,
+            CASE WHEN (am.days_present + am.days_absent) > 0
+                THEN ROUND((100.0 * am.days_present / (am.days_present + am.days_absent))::numeric, 1)
                 ELSE 0
             END as attendance_rate,
-            comment_replies,
-            total_recv + total_sent as total_messages
-        FROM agent_metrics
-        WHERE total_recv > 0 OR days_present > 0
-        ORDER BY total_messages DESC
+            am.comment_replies,
+            COALESCE(uu.unique_user_count, 0) as unique_users
+        FROM agent_metrics am
+        LEFT JOIN unique_users uu ON am.agent_name = uu.agent_name
+        WHERE am.total_recv > 0 OR am.days_present > 0
+        ORDER BY unique_user_count DESC NULLS LAST
     """
 
-    cur.execute(query, (start_date, end_date))
+    cur.execute(query, (start_date, end_date, start_date, end_date))
     rows = cur.fetchall()
     cur.close()
     conn.close()
 
     columns = [
-        'agent_name', 'total_recv', 'total_sent', 'response_rate', 'avg_rt',
+        'agent_name', 'total_recv', 'total_sent', 'avg_rt',
         'days_present', 'days_absent', 'days_off', 'total_days', 'attendance_rate',
-        'comment_replies', 'total_messages'
+        'comment_replies', 'unique_users'
     ]
 
     return pd.DataFrame(rows, columns=columns)
@@ -141,10 +166,6 @@ def get_weekly_trend(start_date, end_date, agent_name):
             DATE_TRUNC('week', ads.date)::date as week_start,
             SUM(ads.messages_received) as recv,
             SUM(ads.messages_sent) as sent,
-            CASE WHEN SUM(ads.messages_received) > 0
-                THEN ROUND((100.0 * SUM(ads.messages_sent) / SUM(ads.messages_received))::numeric, 1)
-                ELSE 0
-            END as response_rate,
             AVG(ads.avg_response_time_seconds) FILTER (WHERE ads.avg_response_time_seconds > 10) as avg_rt
         FROM agents a
         JOIN agent_daily_stats ads ON a.id = ads.agent_id
@@ -156,33 +177,71 @@ def get_weekly_trend(start_date, end_date, agent_name):
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return pd.DataFrame(rows, columns=['week', 'recv', 'sent', 'response_rate', 'avg_rt'])
+    return pd.DataFrame(rows, columns=['week', 'recv', 'sent', 'avg_rt'])
 
 
 # ============================================
 # SCORING FUNCTIONS
 # ============================================
 
+def calculate_qa_score(avg_rt):
+    """
+    Calculate QA Score based on response time thresholds
+    Excellent (<5min): 100
+    Good (5-15min): 75-99
+    Average (15-30min): 50-74
+    Poor (30-60min): 25-49
+    Very Poor (>60min): 0-24
+    """
+    if avg_rt is None or avg_rt <= 0:
+        return 50  # Default if no data
+
+    avg_rt = float(avg_rt)
+
+    if avg_rt <= QA_THRESHOLDS['excellent']:
+        return 100
+    elif avg_rt <= QA_THRESHOLDS['good']:
+        # Linear interpolation from 100 to 75
+        return 100 - ((avg_rt - 300) / 600) * 25
+    elif avg_rt <= QA_THRESHOLDS['average']:
+        # Linear interpolation from 75 to 50
+        return 75 - ((avg_rt - 900) / 900) * 25
+    elif avg_rt <= QA_THRESHOLDS['poor']:
+        # Linear interpolation from 50 to 25
+        return 50 - ((avg_rt - 1800) / 1800) * 25
+    else:
+        # Below 25, approaching 0
+        return max(0, 25 - ((avg_rt - 3600) / 3600) * 25)
+
+
+def get_qa_rating(qa_score):
+    """Get QA rating label based on score"""
+    if qa_score >= 90:
+        return "Excellent", "🟢"
+    elif qa_score >= 75:
+        return "Good", "🟡"
+    elif qa_score >= 50:
+        return "Average", "🟠"
+    else:
+        return "Needs Improvement", "🔴"
+
+
 def calculate_performance_score(row, max_values):
     """Calculate weighted performance score for an agent (0-100)"""
 
     # Convert all values to float to handle Decimal types from database
-    response_rate = float(row['response_rate'] or 0)
-    total_messages = float(row['total_messages'] or 0)
-    total_recv = float(row['total_recv'] or 0)
-    total_sent = float(row['total_sent'] or 0)
     avg_rt = float(row['avg_rt'] or 0)
+    unique_users = float(row['unique_users'] or 0)
     attendance_rate = float(row['attendance_rate'] or 0)
 
-    # Response Rate Score (0-100, capped at 100%)
-    rr_score = min(response_rate, 100)
+    # QA Score (based on response time quality)
+    qa_score = calculate_qa_score(avg_rt)
 
-    # Messages Handled Score (normalized to max)
-    max_messages = float(max_values.get('total_messages', 1) or 1)
-    msg_score = (total_messages / max_messages) * 100 if max_messages > 0 else 0
+    # Unique Users Score (normalized to max)
+    max_users = float(max_values.get('unique_users', 1) or 1)
+    users_score = (unique_users / max_users) * 100 if max_users > 0 else 0
 
     # Response Time Score (inverse - lower is better)
-    # Target: <5min=100, 5-15min=75, 15-30min=50, 30-60min=25, >60min=0
     if avg_rt <= 300:  # 5 minutes
         rt_score = 100
     elif avg_rt <= 900:  # 15 minutes
@@ -197,19 +256,12 @@ def calculate_performance_score(row, max_values):
     # Attendance Score
     att_score = attendance_rate
 
-    # Efficiency Score (sent/received ratio, capped at 100%)
-    if total_recv > 0:
-        eff_score = min((total_sent / total_recv) * 100, 100)
-    else:
-        eff_score = 0
-
     # Weighted total
     total_score = (
-        SCORE_WEIGHTS['response_rate'] * rr_score +
-        SCORE_WEIGHTS['messages_handled'] * msg_score +
+        SCORE_WEIGHTS['qa_score'] * qa_score +
+        SCORE_WEIGHTS['unique_users'] * users_score +
         SCORE_WEIGHTS['response_time'] * rt_score +
-        SCORE_WEIGHTS['attendance'] * att_score +
-        SCORE_WEIGHTS['efficiency'] * eff_score
+        SCORE_WEIGHTS['attendance'] * att_score
     )
 
     return round(float(total_score), 1)
@@ -293,193 +345,185 @@ with st.sidebar:
 
     # Scoring info
     st.subheader("Scoring Weights")
-    for metric, weight in SCORE_WEIGHTS.items():
-        st.caption(f"• {metric.replace('_', ' ').title()}: {int(weight*100)}%")
+    st.markdown(f"""
+    - **QA Score**: {int(SCORE_WEIGHTS['qa_score']*100)}%
+    - **Unique Users**: {int(SCORE_WEIGHTS['unique_users']*100)}%
+    - **Response Time**: {int(SCORE_WEIGHTS['response_time']*100)}%
+    - **Attendance**: {int(SCORE_WEIGHTS['attendance']*100)}%
+    """)
 
     st.markdown("---")
 
-    # Tier thresholds
     st.subheader("Tier Thresholds")
-    for tier, threshold in TIER_THRESHOLDS.items():
-        badge = TIER_BADGES.get(tier, '')
-        st.caption(f"{badge} {tier.title()}: {threshold}+ pts")
+    st.markdown(f"""
+    - 💎 Platinum: {TIER_THRESHOLDS['platinum']}+
+    - 🥇 Gold: {TIER_THRESHOLDS['gold']}+
+    - 🥈 Silver: {TIER_THRESHOLDS['silver']}+
+    - 🥉 Bronze: {TIER_THRESHOLDS['bronze']}+
+    """)
 
-# Get data
-agent_stats = get_agent_stats(start_date, end_date)
+# Load data
+df = get_agent_stats(start_date, end_date)
 
-if agent_stats.empty:
-    st.warning("No agent data available for the selected period")
+if df.empty:
+    st.warning("No agent data found for the selected period.")
     st.stop()
 
-# Calculate scores and tiers
+# Calculate max values for normalization
 max_values = {
-    'total_messages': agent_stats['total_messages'].max()
+    'unique_users': df['unique_users'].max() if 'unique_users' in df.columns else 1
 }
 
-agent_stats['score'] = agent_stats.apply(lambda row: calculate_performance_score(row, max_values), axis=1)
-agent_stats['tier'] = agent_stats['score'].apply(get_tier)
-agent_stats['rank'] = agent_stats['score'].rank(ascending=False, method='min').astype(int)
+# Calculate scores and tiers
+df['qa_score'] = df.apply(lambda row: calculate_qa_score(row['avg_rt']), axis=1)
+df['score'] = df.apply(lambda row: calculate_performance_score(row, max_values), axis=1)
+df['tier'] = df['score'].apply(get_tier)
 
 # Sort by score
-agent_stats = agent_stats.sort_values('score', ascending=False).reset_index(drop=True)
+df = df.sort_values('score', ascending=False).reset_index(drop=True)
+df['rank'] = df.index + 1
 
-# ============================================
-# SUMMARY STATS
-# ============================================
+# Summary stats
+st.subheader("📊 Summary")
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    st.metric("Total Agents", len(agent_stats))
+    st.metric("Total Agents", len(df))
 
 with col2:
-    platinum_gold = len(agent_stats[agent_stats['tier'].isin(['platinum', 'gold'])])
-    st.metric("Top Performers", f"{platinum_gold} agents", help="Platinum + Gold tier agents")
+    top_performers = len(df[df['tier'].isin(['platinum', 'gold'])])
+    st.metric("Top Performers", top_performers, help="Platinum + Gold tier agents")
 
 with col3:
-    avg_score = agent_stats['score'].mean()
+    avg_score = df['score'].mean()
     st.metric("Avg Score", f"{avg_score:.1f}")
 
 with col4:
-    avg_response = agent_stats['response_rate'].mean()
-    st.metric("Avg Response Rate", f"{avg_response:.1f}%")
+    avg_qa = df['qa_score'].mean()
+    st.metric("Avg QA Score", f"{avg_qa:.1f}")
 
 st.markdown("---")
 
-# ============================================
-# LEADERBOARD TABS
-# ============================================
-tab1, tab2, tab3, tab4 = st.tabs(["Overall Rankings", "By Tier", "By Response Time", "Agent Details"])
+# Tabs
+tab1, tab2, tab3, tab4 = st.tabs(["🏆 Overall Rankings", "📊 By Tier", "⏱️ By Response Time", "👤 Agent Details"])
 
 with tab1:
-    st.subheader("Overall Performance Rankings")
+    st.subheader("Overall Rankings")
 
     # Create display dataframe
-    display_df = agent_stats.copy()
+    display_df = df[['rank', 'agent_name', 'score', 'tier', 'qa_score', 'unique_users', 'avg_rt', 'attendance_rate']].copy()
+    display_df['tier_badge'] = display_df['tier'].apply(lambda x: TIER_BADGES.get(x, '📊'))
+    display_df['qa_rating'] = display_df['qa_score'].apply(lambda x: get_qa_rating(x)[1])
+    display_df['avg_rt_display'] = display_df['avg_rt'].apply(lambda x: format_rt(x) if x else 'N/A')
 
-    # Add tier badges
-    display_df['Tier'] = display_df['tier'].apply(lambda x: f"{TIER_BADGES.get(x, '')} {x.title()}")
-    display_df['Rank'] = display_df['rank'].apply(lambda x: f"#{x}")
+    # Format for display
+    display_df = display_df.rename(columns={
+        'rank': 'Rank',
+        'agent_name': 'Agent',
+        'score': 'Score',
+        'tier_badge': 'Tier',
+        'qa_score': 'QA Score',
+        'qa_rating': 'QA',
+        'unique_users': 'Unique Users',
+        'avg_rt_display': 'Avg RT',
+        'attendance_rate': 'Attendance'
+    })
 
-    # Format columns
-    display_df['Score'] = display_df['score'].apply(lambda x: f"{x:.1f}")
-    display_df['Response Rate'] = display_df['response_rate'].apply(lambda x: f"{x:.1f}%")
-    display_df['Avg RT'] = display_df['avg_rt'].apply(format_rt)
-    display_df['Messages'] = display_df['total_messages'].apply(lambda x: f"{int(x):,}")
-    display_df['Attendance'] = display_df['attendance_rate'].apply(lambda x: f"{x:.1f}%")
-
-    # Select and rename columns
-    leaderboard = display_df[[
-        'Rank', 'agent_name', 'Score', 'Tier', 'Messages', 'Response Rate', 'Avg RT', 'Attendance'
-    ]].rename(columns={'agent_name': 'Agent'})
-
+    display_cols = ['Rank', 'Tier', 'Agent', 'Score', 'QA', 'QA Score', 'Unique Users', 'Avg RT', 'Attendance']
     st.dataframe(
-        leaderboard,
+        display_df[display_cols],
         hide_index=True,
         width="stretch",
-        height=min(len(leaderboard) * 35 + 38, 600)
+        column_config={
+            "Score": st.column_config.NumberColumn(format="%.1f"),
+            "QA Score": st.column_config.NumberColumn(format="%.1f"),
+            "Unique Users": st.column_config.NumberColumn(format="%d"),
+            "Attendance": st.column_config.NumberColumn(format="%.1f%%")
+        }
     )
 
     # Score distribution chart
     st.subheader("Score Distribution")
-
     fig = px.histogram(
-        agent_stats,
+        df,
         x='score',
         nbins=20,
         title='Agent Score Distribution',
-        labels={'score': 'Performance Score', 'count': 'Number of Agents'},
         color_discrete_sequence=[COLORS['primary']]
     )
-
-    # Add tier threshold lines
-    for tier, threshold in TIER_THRESHOLDS.items():
-        badge, color = get_tier_display(tier)
-        fig.add_vline(x=threshold, line_dash="dash", line_color=color,
-                      annotation_text=f"{tier.title()}", annotation_position="top")
-
-    fig.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
+    fig.update_layout(
+        xaxis_title="Score",
+        yaxis_title="Number of Agents",
+        height=300
+    )
     st.plotly_chart(fig, width="stretch")
 
 with tab2:
-    st.subheader("Agents by Performance Tier")
+    st.subheader("Agents by Tier")
 
-    # Group by tier
     tier_order = ['platinum', 'gold', 'silver', 'bronze', 'standard']
 
     for tier in tier_order:
-        tier_agents = agent_stats[agent_stats['tier'] == tier]
-        if not tier_agents.empty:
+        tier_df = df[df['tier'] == tier]
+        if len(tier_df) > 0:
             badge, color = get_tier_display(tier)
-
-            with st.expander(f"{badge} {tier.title()} Tier ({len(tier_agents)} agents)", expanded=(tier in ['platinum', 'gold'])):
-                tier_display = tier_agents[[
-                    'rank', 'agent_name', 'score', 'total_messages', 'response_rate', 'avg_rt', 'attendance_rate'
-                ]].copy()
-
-                tier_display['rank'] = tier_display['rank'].apply(lambda x: f"#{x}")
-                tier_display['score'] = tier_display['score'].apply(lambda x: f"{x:.1f}")
-                tier_display['total_messages'] = tier_display['total_messages'].apply(lambda x: f"{int(x):,}")
-                tier_display['response_rate'] = tier_display['response_rate'].apply(lambda x: f"{x:.1f}%")
-                tier_display['avg_rt'] = tier_display['avg_rt'].apply(format_rt)
-                tier_display['attendance_rate'] = tier_display['attendance_rate'].apply(lambda x: f"{x:.1f}%")
-
-                tier_display.columns = ['Rank', 'Agent', 'Score', 'Messages', 'Response Rate', 'Avg RT', 'Attendance']
-
+            with st.expander(f"{badge} {tier.title()} ({len(tier_df)} agents)", expanded=(tier in ['platinum', 'gold'])):
+                tier_display = tier_df[['rank', 'agent_name', 'score', 'qa_score', 'unique_users', 'attendance_rate']].copy()
+                tier_display.columns = ['Rank', 'Agent', 'Score', 'QA Score', 'Unique Users', 'Attendance %']
                 st.dataframe(tier_display, hide_index=True, width="stretch")
 
 with tab3:
-    st.subheader("Response Time Leaderboard")
+    st.subheader("Response Time Analysis")
 
-    # Filter agents with valid response time
-    rt_agents = agent_stats[agent_stats['avg_rt'].notna() & (agent_stats['avg_rt'] > 0)].copy()
-    rt_agents = rt_agents.sort_values('avg_rt', ascending=True).reset_index(drop=True)
-    rt_agents['rt_rank'] = range(1, len(rt_agents) + 1)
+    # Sort by response time
+    rt_df = df.sort_values('avg_rt').copy()
+    rt_df['avg_rt_display'] = rt_df['avg_rt'].apply(lambda x: format_rt(x) if x else 'N/A')
+    rt_df['qa_rating'], rt_df['qa_icon'] = zip(*rt_df['qa_score'].apply(get_qa_rating))
 
-    col1, col2 = st.columns([2, 1])
+    rt_display = rt_df[['rank', 'agent_name', 'avg_rt_display', 'qa_score', 'qa_rating', 'unique_users']].copy()
+    rt_display.columns = ['Rank', 'Agent', 'Avg Response Time', 'QA Score', 'QA Rating', 'Unique Users']
 
-    with col1:
-        rt_display = rt_agents[[
-            'rt_rank', 'agent_name', 'avg_rt', 'response_rate', 'total_messages'
-        ]].copy()
+    st.dataframe(rt_display.head(20), hide_index=True, width="stretch")
 
-        rt_display['rt_rank'] = rt_display['rt_rank'].apply(lambda x: f"#{x}")
-        rt_display['avg_rt'] = rt_display['avg_rt'].apply(format_rt)
-        rt_display['response_rate'] = rt_display['response_rate'].apply(lambda x: f"{x:.1f}%")
-        rt_display['total_messages'] = rt_display['total_messages'].apply(lambda x: f"{int(x):,}")
+    # Response time chart
+    st.subheader("Response Time by Agent")
 
-        rt_display.columns = ['Rank', 'Agent', 'Avg Response Time', 'Response Rate', 'Messages']
+    chart_df = df.nsmallest(15, 'avg_rt').copy()
+    chart_df['avg_rt_min'] = chart_df['avg_rt'] / 60  # Convert to minutes
 
-        st.dataframe(rt_display.head(20), hide_index=True, width="stretch")
-
-    with col2:
-        # Response time distribution
-        fig = px.box(
-            agent_stats[agent_stats['avg_rt'].notna()],
-            y='avg_rt',
-            title='Response Time Distribution',
-            labels={'avg_rt': 'Seconds'},
-            color_discrete_sequence=[COLORS['secondary']]
-        )
-        fig.update_layout(height=400, margin=dict(l=0, r=0, t=40, b=0))
-        st.plotly_chart(fig, width="stretch")
+    fig = px.bar(
+        chart_df,
+        x='agent_name',
+        y='avg_rt_min',
+        title='Top 15 Fastest Response Times',
+        color='qa_score',
+        color_continuous_scale=['#ef4444', '#f59e0b', '#10b981'],
+        range_color=[0, 100]
+    )
+    fig.update_layout(
+        xaxis_title="Agent",
+        yaxis_title="Avg Response Time (minutes)",
+        height=400
+    )
+    fig.update_coloraxes(colorbar_title="QA Score")
+    st.plotly_chart(fig, width="stretch")
 
 with tab4:
-    st.subheader("Agent Performance Details")
+    st.subheader("Agent Details")
 
     # Agent selector
-    selected_agent = st.selectbox(
-        "Select Agent",
-        options=agent_stats['agent_name'].tolist(),
-        format_func=lambda x: f"#{agent_stats[agent_stats['agent_name']==x]['rank'].values[0]} - {x}"
-    )
+    agent_names = df['agent_name'].tolist()
+    selected_agent = st.selectbox("Select Agent", agent_names)
 
     if selected_agent:
-        agent_row = agent_stats[agent_stats['agent_name'] == selected_agent].iloc[0]
-        badge, color = get_tier_display(agent_row['tier'])
+        agent_row = df[df['agent_name'] == selected_agent].iloc[0]
+        tier = agent_row['tier']
+        badge, color = get_tier_display(tier)
+        qa_rating, qa_icon = get_qa_rating(agent_row['qa_score'])
 
         # Header with tier badge
         st.markdown(f"### {badge} {selected_agent}")
-        st.markdown(f"**Rank:** #{int(agent_row['rank'])} | **Score:** {agent_row['score']:.1f} | **Tier:** {agent_row['tier'].title()}")
+        st.markdown(f"**Rank:** #{int(agent_row['rank'])} | **Score:** {agent_row['score']:.1f} | **Tier:** {tier.title()}")
 
         st.markdown("---")
 
@@ -487,12 +531,11 @@ with tab4:
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            st.metric("Messages Handled", f"{int(agent_row['total_messages']):,}")
-            st.caption(f"Received: {int(agent_row['total_recv']):,}")
-            st.caption(f"Sent: {int(agent_row['total_sent']):,}")
+            st.metric("QA Score", f"{agent_row['qa_score']:.1f}")
+            st.caption(f"{qa_icon} {qa_rating}")
 
         with col2:
-            st.metric("Response Rate", f"{agent_row['response_rate']:.1f}%")
+            st.metric("Unique Users", f"{int(agent_row['unique_users']):,}")
 
         with col3:
             st.metric("Avg Response Time", format_rt(agent_row['avg_rt']))
@@ -507,9 +550,10 @@ with tab4:
         st.subheader("Score Breakdown")
 
         # Calculate individual scores (convert to float for Decimal compatibility)
-        max_msg = float(max_values.get('total_messages', 1))
-        rr_score = min(float(agent_row['response_rate'] or 0), 100)
-        msg_score = (float(agent_row['total_messages'] or 0) / max_msg) * 100 if max_msg > 0 else 0
+        max_users = float(max_values.get('unique_users', 1))
+        qa_score = float(agent_row['qa_score'] or 0)
+        unique_users = float(agent_row['unique_users'] or 0)
+        users_score = (unique_users / max_users) * 100 if max_users > 0 else 0
 
         avg_rt = float(agent_row['avg_rt'] or 0)
         if avg_rt <= 300:
@@ -525,23 +569,15 @@ with tab4:
 
         att_score = float(agent_row['attendance_rate'] or 0)
 
-        total_recv = float(agent_row['total_recv'] or 0)
-        total_sent = float(agent_row['total_sent'] or 0)
-        if total_recv > 0:
-            eff_score = min((total_sent / total_recv) * 100, 100)
-        else:
-            eff_score = 0
-
         score_data = pd.DataFrame({
-            'Metric': ['Response Rate', 'Message Volume', 'Response Time', 'Attendance', 'Efficiency'],
-            'Score': [rr_score, msg_score, rt_score, att_score, eff_score],
-            'Weight': [30, 25, 20, 15, 10],
+            'Metric': ['QA Score', 'Unique Users', 'Response Time', 'Attendance'],
+            'Score': [qa_score, users_score, rt_score, att_score],
+            'Weight': [35, 30, 20, 15],
             'Weighted': [
-                rr_score * 0.30,
-                msg_score * 0.25,
+                qa_score * 0.35,
+                users_score * 0.30,
                 rt_score * 0.20,
-                att_score * 0.15,
-                eff_score * 0.10
+                att_score * 0.15
             ]
         })
 
@@ -583,69 +619,32 @@ with tab4:
                     x=trend_data['week'],
                     y=trend_data['recv'],
                     name='Received',
-                    mode='lines+markers',
-                    line=dict(color=COLORS['primary'], width=2)
+                    line=dict(color=COLORS['primary'])
                 ))
                 fig.add_trace(go.Scatter(
                     x=trend_data['week'],
                     y=trend_data['sent'],
                     name='Sent',
-                    mode='lines+markers',
-                    line=dict(color=COLORS['secondary'], width=2)
+                    line=dict(color=COLORS['secondary'])
                 ))
                 fig.update_layout(
-                    title='Weekly Messages',
+                    title='Messages by Week',
                     height=250,
-                    margin=dict(l=0, r=0, t=40, b=0),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02)
+                    margin=dict(l=0, r=0, t=40, b=0)
                 )
                 st.plotly_chart(fig, width="stretch")
 
             with col2:
+                trend_data['avg_rt_min'] = trend_data['avg_rt'] / 60
                 fig = px.line(
                     trend_data,
                     x='week',
-                    y='response_rate',
-                    title='Weekly Response Rate',
+                    y='avg_rt_min',
+                    title='Response Time by Week (minutes)',
                     markers=True
                 )
                 fig.update_traces(line_color=COLORS['accent'])
                 fig.update_layout(height=250, margin=dict(l=0, r=0, t=40, b=0))
-                fig.update_yaxes(title='Response Rate (%)')
                 st.plotly_chart(fig, width="stretch")
         else:
-            st.info("No weekly trend data available for this agent")
-
-# ============================================
-# EXPORT
-# ============================================
-st.markdown("---")
-
-with st.expander("Export Leaderboard"):
-    # Prepare export data
-    export_df = agent_stats[[
-        'rank', 'agent_name', 'score', 'tier', 'total_recv', 'total_sent',
-        'response_rate', 'avg_rt', 'attendance_rate', 'days_present', 'days_absent'
-    ]].copy()
-
-    export_df.columns = [
-        'Rank', 'Agent', 'Score', 'Tier', 'Messages Received', 'Messages Sent',
-        'Response Rate %', 'Avg Response Time (s)', 'Attendance Rate %', 'Days Present', 'Days Absent'
-    ]
-
-    csv = export_df.to_csv(index=False)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.download_button(
-            label="Download CSV",
-            data=csv,
-            file_name=f"leaderboard_{start_date}_to_{end_date}.csv",
-            mime="text/csv"
-        )
-    with col2:
-        st.caption(f"Export includes {len(export_df)} agents")
-
-# Footer
-st.markdown("---")
-st.caption("All times in Philippine Time (UTC+8) | Scoring based on multi-metric weighted analysis")
+            st.info("No weekly trend data available for this period.")
