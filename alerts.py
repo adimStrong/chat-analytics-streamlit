@@ -360,4 +360,4 @@ def display_alerts_table(alerts):
     if available_cols:
         display_df = df[available_cols].copy()
         display_df.columns = [c.title() for c in available_cols]
-        st.dataframe(display_df, hide_index=True, width="stretch")
+        st.dataframe(display_df, hide_index=True, use_container_width=True)
