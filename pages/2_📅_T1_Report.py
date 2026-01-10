@@ -5,11 +5,15 @@ Shows previous day's data for review with date range support
 
 import streamlit as st
 import pandas as pd
-import psycopg2
 from datetime import date, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 import io
+
+# Import shared modules
+from config import CORE_PAGES, CORE_PAGES_SQL, TIMEZONE, CACHE_TTL, COLORS
+from db_utils import get_simple_connection as get_connection
+from utils import format_number, format_rt, style_status
 
 # Page config
 st.set_page_config(
@@ -17,23 +21,6 @@ st.set_page_config(
     page_icon="📊",
     layout="wide"
 )
-
-# Database connection
-DATABASE_URL = "postgresql://postgres:OQKZTvPIBcUUSUowYaFZFNisaAADLwzF@tramway.proxy.rlwy.net:28999/railway"
-
-@st.cache_resource
-def get_connection():
-    return psycopg2.connect(DATABASE_URL)
-
-def format_number(val):
-    """Format number with comma separator"""
-    if pd.isna(val):
-        return "N/A"
-    if isinstance(val, (int, float)):
-        if val == int(val):
-            return f"{int(val):,}"
-        return f"{val:,.1f}"
-    return val
 
 # Get yesterday's date (T+1 reporting)
 today = date.today()
@@ -81,7 +68,29 @@ with st.sidebar:
         date_label = report_date.strftime('%B %d, %Y (%A)')
 
     st.markdown("---")
+
+    # Period comparison toggle
+    st.subheader("📊 Period Comparison")
+    enable_comparison = st.checkbox("Compare with previous period", value=False)
+
+    if enable_comparison:
+        # Calculate previous period (same duration)
+        period_days = (to_date - from_date).days + 1
+        prev_end_date = from_date - timedelta(days=1)
+        prev_start_date = prev_end_date - timedelta(days=period_days - 1)
+        st.caption(f"Comparing to: {prev_start_date} - {prev_end_date}")
+    else:
+        prev_start_date = None
+        prev_end_date = None
+
+    st.markdown("---")
     st.subheader("📥 Export Report")
+
+# Helper function for calculating change
+def calc_change(current, previous):
+    if previous is None or previous == 0:
+        return None
+    return round(((current - previous) / previous) * 100, 1)
 
 # ============================================
 # TITLE (After date selection so it updates)
@@ -140,22 +149,95 @@ cmt_reply = cmt_row[0] if cmt_row else 0
 # Response rate
 response_rate = (msg_sent / msg_recv * 100) if msg_recv > 0 else 0
 
+# Get previous period data if comparison enabled
+prev_msg_recv, prev_msg_sent, prev_unique_users, prev_new_chats, prev_cmt_reply = 0, 0, 0, 0, 0
+prev_response_rate = 0
+
+if enable_comparison and prev_start_date and prev_end_date:
+    # Previous period messages
+    cur.execute("""
+        WITH first_messages AS (
+            SELECT sender_id, MIN(message_time) as first_msg_time
+            FROM messages
+            WHERE is_from_page = false
+            GROUP BY sender_id
+        )
+        SELECT
+            COUNT(*) FILTER (WHERE m.is_from_page = false) as recv,
+            COUNT(*) FILTER (WHERE m.is_from_page = true) as sent,
+            COUNT(DISTINCT m.sender_id) FILTER (WHERE m.is_from_page = false) as unique_users,
+            COUNT(DISTINCT CASE
+                WHEN (fm.first_msg_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+                THEN m.sender_id
+            END) as new_chats
+        FROM messages m
+        LEFT JOIN first_messages fm ON m.sender_id = fm.sender_id
+        WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+    """, (prev_start_date, prev_end_date, prev_start_date, prev_end_date))
+    prev_msg_row = cur.fetchone()
+    prev_msg_recv, prev_msg_sent, prev_unique_users, prev_new_chats = prev_msg_row if prev_msg_row else (0, 0, 0, 0)
+
+    # Previous period comments
+    cur.execute("""
+        SELECT
+            COUNT(*) FILTER (WHERE author_id IS NOT NULL AND author_id = page_id) as replies
+        FROM comments
+        WHERE (comment_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+    """, (prev_start_date, prev_end_date))
+    prev_cmt_row = cur.fetchone()
+    prev_cmt_reply = prev_cmt_row[0] if prev_cmt_row else 0
+
+    prev_response_rate = (prev_msg_sent / prev_msg_recv * 100) if prev_msg_recv > 0 else 0
+
 # Display summary cards
 st.subheader("📈 Daily Summary")
+
+if enable_comparison and prev_start_date:
+    st.caption(f"Compared to {prev_start_date.strftime('%b %d')} - {prev_end_date.strftime('%b %d, %Y')}")
+
 col1, col2, col3, col4, col5, col6 = st.columns(6)
 
 with col1:
-    st.metric("📥 Messages Received", f"{msg_recv:,}")
+    delta = None
+    if enable_comparison and prev_msg_recv > 0:
+        change = calc_change(msg_recv, prev_msg_recv)
+        delta = f"{change:+.1f}%" if change is not None else None
+    st.metric("📥 Messages Received", f"{msg_recv:,}", delta)
+
 with col2:
-    st.metric("📤 Messages Sent", f"{msg_sent:,}")
+    delta = None
+    if enable_comparison and prev_msg_sent > 0:
+        change = calc_change(msg_sent, prev_msg_sent)
+        delta = f"{change:+.1f}%" if change is not None else None
+    st.metric("📤 Messages Sent", f"{msg_sent:,}", delta)
+
 with col3:
-    st.metric("👥 Unique Users", f"{unique_users:,}")
+    delta = None
+    if enable_comparison and prev_unique_users > 0:
+        change = calc_change(unique_users, prev_unique_users)
+        delta = f"{change:+.1f}%" if change is not None else None
+    st.metric("👥 Unique Users", f"{unique_users:,}", delta)
+
 with col4:
-    st.metric("🆕 New Chats", f"{new_chats:,}")
+    delta = None
+    if enable_comparison and prev_new_chats > 0:
+        change = calc_change(new_chats, prev_new_chats)
+        delta = f"{change:+.1f}%" if change is not None else None
+    st.metric("🆕 New Chats", f"{new_chats:,}", delta)
+
 with col5:
-    st.metric("📊 Response Rate", f"{response_rate:.1f}%")
+    delta = None
+    if enable_comparison and prev_response_rate > 0:
+        change = calc_change(response_rate, prev_response_rate)
+        delta = f"{change:+.1f}%" if change is not None else None
+    st.metric("📊 Response Rate", f"{response_rate:.1f}%", delta)
+
 with col6:
-    st.metric("↩️ Page Comments", f"{cmt_reply:,}")
+    delta = None
+    if enable_comparison and prev_cmt_reply > 0:
+        change = calc_change(cmt_reply, prev_cmt_reply)
+        delta = f"{change:+.1f}%" if change is not None else None
+    st.metric("↩️ Page Comments", f"{cmt_reply:,}", delta)
 
 st.markdown("---")
 
@@ -164,21 +246,7 @@ st.markdown("---")
 # ============================================
 st.subheader("👥 SMA Member Performance")
 
-# Helper function to format response time
-def format_rt(seconds):
-    """Format response time in seconds to human readable format"""
-    if pd.isna(seconds) or seconds is None or seconds == 0:
-        return "-"
-    if seconds < 60:
-        return f"{int(seconds)}s"
-    elif seconds < 3600:
-        mins = int(seconds // 60)
-        secs = int(seconds % 60)
-        return f"{mins}m {secs}s"
-    else:
-        hrs = int(seconds // 3600)
-        mins = int((seconds % 3600) // 60)
-        return f"{hrs}h {mins}m"
+# format_rt is imported from utils module
 
 # Calculate total days in date range
 total_days_in_range = (to_date - from_date).days + 1
@@ -298,16 +366,7 @@ sma_data = cur.fetchall()
 if sma_data:
     sma_df = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %', 'Avg RT', 'Human RT', 'Days Present', 'Total Days'])
 
-    # Color code by status
-    def style_status(val):
-        if val == 'present':
-            return 'background-color: #d1fae5; color: #065f46'  # green
-        elif val == 'absent':
-            return 'background-color: #fee2e2; color: #991b1b'  # red
-        elif val == 'off':
-            return 'background-color: #f3f4f6; color: #4b5563'  # gray
-        return ''
-
+    # style_status is imported from utils module
     sma_display = sma_df.copy()
     for col in ['New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments', 'Days Present', 'Total Days']:
         sma_display[col] = sma_display[col].apply(format_number)
@@ -321,7 +380,7 @@ if sma_data:
         st.dataframe(
             sma_display.style.applymap(style_status, subset=['Status']),
             hide_index=True,
-            use_container_width=True
+            width="stretch"
         )
 
     with col2:
@@ -411,7 +470,7 @@ if page_matrix_data:
     for col in ['Msg Recv', 'Msg Sent', 'Unique Users']:
         page_matrix_display[col] = page_matrix_display[col].apply(format_number)
 
-    st.dataframe(page_matrix_display, hide_index=True, use_container_width=True)
+    st.dataframe(page_matrix_display, hide_index=True, width="stretch")
 
     with st.expander("ℹ️ About this table"):
         st.markdown("""

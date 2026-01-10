@@ -1,6 +1,6 @@
 """
 Chat Analytics Dashboard
-SMA Report and T+1 Daily Report
+Executive Dashboard, T+1 Report, and Leaderboard
 """
 
 import streamlit as st
@@ -20,8 +20,9 @@ st.markdown("""
 
 Use the sidebar to navigate between reports:
 
-- **📊 SMA Report** - Social Media Agent daily performance tracking
+- **🏠 Executive Dashboard** - High-level KPIs, trends, and alerts
 - **📅 T1 Report** - T+1 Daily summary with date range support
+- **🏆 Leaderboard** - Agent rankings and performance scores
 
 """)
 
