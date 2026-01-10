@@ -2,21 +2,24 @@
 Agent Leaderboard - Rankings and Performance Tiers
 Comprehensive agent performance scoring with multi-metric analysis
 
-Scoring System:
-- QA Score: 35% (based on response time quality thresholds)
-- Unique Users: 30% (unique conversations/users handled)
-- Response Time: 20% (average response time - lower is better)
-- Attendance: 15% (attendance rate)
+QA Scoring System (Industry Standard):
+- Response Time Score: 40% (how fast agents respond)
+- Resolution Rate: 35% (% of conversations closed with spill keywords)
+- Productivity Score: 25% (messages sent per day vs team average)
 """
 
 import streamlit as st
 import pandas as pd
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 import plotly.express as px
 import plotly.graph_objects as go
 
 # Import shared modules
-from config import CORE_PAGES, CORE_PAGES_SQL, TIMEZONE, CACHE_TTL, COLORS
+from config import (
+    CORE_PAGES, CORE_PAGES_SQL, TIMEZONE, CACHE_TTL, COLORS,
+    LIVESTREAM_PAGES_SQL, SOCMED_PAGES_SQL,
+    SPILL_KEYWORDS, SPILL_START_DATE, QA_WEIGHTS, QA_RESPONSE_THRESHOLDS
+)
 from db_utils import get_simple_connection as get_connection
 from utils import format_number, format_rt, format_percentage
 
@@ -28,14 +31,12 @@ st.set_page_config(
 )
 
 # ============================================
-# SCORING CONFIGURATION
+# SCORING CONFIGURATION (from config.py)
 # ============================================
-SCORE_WEIGHTS = {
-    'qa_score': 0.35,            # 35% - QA Score (response time quality)
-    'unique_users': 0.30,        # 30% - Unique users/conversations handled
-    'response_time': 0.20,       # 20% - Average response time (inverse - lower is better)
-    'attendance': 0.15           # 15% - Attendance rate
-}
+# Uses QA_WEIGHTS from config:
+#   response_time: 40% - How fast agents respond
+#   resolution_rate: 35% - % of conversations closed with spill keywords
+#   productivity: 25% - Messages sent per day vs team average
 
 TIER_THRESHOLDS = {
     'platinum': 90,
@@ -52,14 +53,13 @@ TIER_BADGES = {
     'standard': '📊'
 }
 
-# QA Score thresholds (based on response time)
-# Excellent: <5min, Good: 5-15min, Average: 15-30min, Poor: >30min
-QA_THRESHOLDS = {
-    'excellent': 300,    # 5 minutes
-    'good': 900,         # 15 minutes
-    'average': 1800,     # 30 minutes
-    'poor': 3600         # 60 minutes
-}
+# Build spill detection SQL conditions
+def build_spill_sql_conditions():
+    """Build SQL LIKE conditions for spill detection"""
+    conditions = []
+    for keyword in SPILL_KEYWORDS:
+        conditions.append(f"LOWER(message_text) LIKE '%{keyword.lower()}%'")
+    return " OR ".join(conditions)
 
 # ============================================
 # DATA FUNCTIONS
@@ -77,18 +77,18 @@ def get_agent_stats(start_date, end_date):
             SELECT
                 a.id as agent_id,
                 a.agent_name,
-                -- Message metrics
-                COALESCE(SUM(ads.messages_received), 0) as total_recv,
-                COALESCE(SUM(ads.messages_sent), 0) as total_sent,
-                -- Response time (human only, >10s)
-                AVG(ads.avg_response_time_seconds) FILTER (WHERE ads.avg_response_time_seconds > 10) as avg_rt,
+                -- Message metrics (only count when present)
+                COALESCE(SUM(ads.messages_received) FILTER (WHERE ads.schedule_status = 'present'), 0) as total_recv,
+                COALESCE(SUM(ads.messages_sent) FILTER (WHERE ads.schedule_status = 'present'), 0) as total_sent,
+                -- Response time (human only, >10s, only when present)
+                AVG(ads.avg_response_time_seconds) FILTER (WHERE ads.avg_response_time_seconds > 10 AND ads.schedule_status = 'present') as avg_rt,
                 -- Attendance
                 COUNT(DISTINCT ads.date) FILTER (WHERE ads.schedule_status = 'present') as days_present,
                 COUNT(DISTINCT ads.date) FILTER (WHERE ads.schedule_status = 'absent') as days_absent,
                 COUNT(DISTINCT ads.date) FILTER (WHERE ads.schedule_status = 'off') as days_off,
                 COUNT(DISTINCT ads.date) as total_days,
-                -- Comment replies
-                COALESCE(SUM(ads.comment_replies), 0) as comment_replies
+                -- Comment replies (only count when present)
+                COALESCE(SUM(ads.comment_replies) FILTER (WHERE ads.schedule_status = 'present'), 0) as comment_replies
             FROM agents a
             JOIN agent_daily_stats ads ON a.id = ads.agent_id
             WHERE ads.date BETWEEN %s AND %s
@@ -158,15 +158,15 @@ def get_date_range():
 
 @st.cache_data(ttl=CACHE_TTL["default"])
 def get_weekly_trend(start_date, end_date, agent_name):
-    """Get weekly performance trend for an agent"""
+    """Get weekly performance trend for an agent (only counts data when present)"""
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("""
         SELECT
             DATE_TRUNC('week', ads.date)::date as week_start,
-            SUM(ads.messages_received) as recv,
-            SUM(ads.messages_sent) as sent,
-            AVG(ads.avg_response_time_seconds) FILTER (WHERE ads.avg_response_time_seconds > 10) as avg_rt
+            SUM(ads.messages_received) FILTER (WHERE ads.schedule_status = 'present') as recv,
+            SUM(ads.messages_sent) FILTER (WHERE ads.schedule_status = 'present') as sent,
+            AVG(ads.avg_response_time_seconds) FILTER (WHERE ads.avg_response_time_seconds > 10 AND ads.schedule_status = 'present') as avg_rt
         FROM agents a
         JOIN agent_daily_stats ads ON a.id = ads.agent_id
         WHERE a.agent_name = %s
@@ -180,38 +180,122 @@ def get_weekly_trend(start_date, end_date, agent_name):
     return pd.DataFrame(rows, columns=['week', 'recv', 'sent', 'avg_rt'])
 
 
+@st.cache_data(ttl=CACHE_TTL["default"])
+def get_resolution_rates(start_date, end_date, page_filter_sql):
+    """
+    Get resolution rates by agent based on spill detection.
+    Resolution = conversation has a message with spill keywords from page.
+    Only counts data from SPILL_START_DATE onwards.
+    """
+    # Check if date range includes spill tracking period
+    spill_start = datetime.strptime(SPILL_START_DATE, "%Y-%m-%d").date()
+
+    # Adjust start date if before spill tracking
+    effective_start = max(start_date, spill_start) if isinstance(start_date, date) else start_date
+
+    if effective_start > end_date:
+        # No spill data available for this date range
+        return pd.DataFrame(columns=['agent_name', 'total_conversations', 'resolved_conversations', 'resolution_rate'])
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Build spill conditions
+    spill_conditions = build_spill_sql_conditions()
+
+    query = f"""
+        WITH agent_conversations AS (
+            -- Get conversations handled by each agent (based on page assignments)
+            SELECT
+                a.agent_name,
+                c.conversation_id,
+                c.page_id
+            FROM agents a
+            JOIN agent_page_assignments apa ON a.id = apa.agent_id AND apa.is_active = true
+            JOIN pages p ON apa.page_id = p.page_id
+            JOIN conversations c ON c.page_id = apa.page_id
+            WHERE a.is_active = true
+              AND p.page_name IN %s
+              AND c.updated_time::date BETWEEN %s AND %s
+        ),
+        resolved_convos AS (
+            -- Find conversations with spill messages from page
+            SELECT DISTINCT
+                ac.agent_name,
+                ac.conversation_id
+            FROM agent_conversations ac
+            JOIN messages m ON m.conversation_id = ac.conversation_id
+            WHERE m.is_from_page = true
+              AND m.message_time::date BETWEEN %s AND %s
+              AND ({spill_conditions})
+        )
+        SELECT
+            ac.agent_name,
+            COUNT(DISTINCT ac.conversation_id) as total_conversations,
+            COUNT(DISTINCT rc.conversation_id) as resolved_conversations
+        FROM agent_conversations ac
+        LEFT JOIN resolved_convos rc ON ac.agent_name = rc.agent_name
+                                     AND ac.conversation_id = rc.conversation_id
+        GROUP BY ac.agent_name
+    """
+
+    cur.execute(query, (page_filter_sql, effective_start, end_date, effective_start, end_date))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    df = pd.DataFrame(rows, columns=['agent_name', 'total_conversations', 'resolved_conversations'])
+
+    # Calculate resolution rate
+    df['resolution_rate'] = df.apply(
+        lambda row: (row['resolved_conversations'] / row['total_conversations'] * 100)
+        if row['total_conversations'] > 0 else 0,
+        axis=1
+    )
+
+    return df
+
+
 # ============================================
 # SCORING FUNCTIONS
 # ============================================
 
-def calculate_qa_score(avg_rt):
+def calculate_response_time_score(avg_rt):
     """
-    Calculate QA Score based on response time thresholds
-    Excellent (<5min): 100
-    Good (5-15min): 75-99
-    Average (15-30min): 50-74
-    Poor (30-60min): 25-49
-    Very Poor (>60min): 0-24
+    Calculate Response Time Score based on thresholds (40% of total)
+    Uses QA_RESPONSE_THRESHOLDS from config.py
     """
     if avg_rt is None or avg_rt <= 0:
         return 50  # Default if no data
 
     avg_rt = float(avg_rt)
 
-    if avg_rt <= QA_THRESHOLDS['excellent']:
+    # Check against thresholds from config
+    if avg_rt <= QA_RESPONSE_THRESHOLDS['excellent']['max_seconds']:
         return 100
-    elif avg_rt <= QA_THRESHOLDS['good']:
-        # Linear interpolation from 100 to 75
-        return 100 - ((avg_rt - 300) / 600) * 25
-    elif avg_rt <= QA_THRESHOLDS['average']:
-        # Linear interpolation from 75 to 50
-        return 75 - ((avg_rt - 900) / 900) * 25
-    elif avg_rt <= QA_THRESHOLDS['poor']:
-        # Linear interpolation from 50 to 25
-        return 50 - ((avg_rt - 1800) / 1800) * 25
+    elif avg_rt <= QA_RESPONSE_THRESHOLDS['good']['max_seconds']:
+        # Linear interpolation from 100 to 80
+        range_size = QA_RESPONSE_THRESHOLDS['good']['max_seconds'] - QA_RESPONSE_THRESHOLDS['excellent']['max_seconds']
+        return 100 - ((avg_rt - 300) / range_size) * 20
+    elif avg_rt <= QA_RESPONSE_THRESHOLDS['average']['max_seconds']:
+        # Linear interpolation from 80 to 60
+        range_size = QA_RESPONSE_THRESHOLDS['average']['max_seconds'] - QA_RESPONSE_THRESHOLDS['good']['max_seconds']
+        return 80 - ((avg_rt - 900) / range_size) * 20
+    elif avg_rt <= QA_RESPONSE_THRESHOLDS['below_average']['max_seconds']:
+        # Linear interpolation from 60 to 40
+        range_size = QA_RESPONSE_THRESHOLDS['below_average']['max_seconds'] - QA_RESPONSE_THRESHOLDS['average']['max_seconds']
+        return 60 - ((avg_rt - 1800) / range_size) * 20
     else:
-        # Below 25, approaching 0
-        return max(0, 25 - ((avg_rt - 3600) / 3600) * 25)
+        # Below 40, approaching 20
+        return max(20, 40 - ((avg_rt - 3600) / 3600) * 20)
+
+
+def calculate_qa_score(avg_rt):
+    """
+    Legacy QA Score function - now wraps calculate_response_time_score
+    Kept for backward compatibility with display
+    """
+    return calculate_response_time_score(avg_rt)
 
 
 def get_qa_rating(qa_score):
@@ -226,42 +310,49 @@ def get_qa_rating(qa_score):
         return "Needs Improvement", "🔴"
 
 
-def calculate_performance_score(row, max_values):
-    """Calculate weighted performance score for an agent (0-100)"""
+def calculate_productivity_score(msgs_sent_per_day, avg_msgs_per_day):
+    """
+    Calculate Productivity Score based on messages sent per day vs team average.
+    This measures actual individual work done, not shared page stats.
+    Score = (agent_daily_msgs / team_avg_daily) * 100, capped at 100
+    """
+    if avg_msgs_per_day <= 0:
+        return 50  # Default if no baseline
+    return min(100, (msgs_sent_per_day / avg_msgs_per_day) * 100)
+
+
+def calculate_performance_score(row, max_values, resolution_rate=None):
+    """
+    Calculate weighted performance score for an agent (0-100)
+    Uses new industry-standard QA formula:
+    - Response Time Score: 40%
+    - Resolution Rate: 35% (spill detection)
+    - Productivity Score: 25% (msgs sent per day vs team avg)
+    """
 
     # Convert all values to float to handle Decimal types from database
     avg_rt = float(row['avg_rt'] or 0)
-    unique_users = float(row['unique_users'] or 0)
-    attendance_rate = float(row['attendance_rate'] or 0)
+    total_sent = float(row['total_sent'] or 0)
+    days_present = float(row['days_present'] or 1)
 
-    # QA Score (based on response time quality)
-    qa_score = calculate_qa_score(avg_rt)
+    # 1. Response Time Score (40%)
+    rt_score = calculate_response_time_score(avg_rt)
 
-    # Unique Users Score (normalized to max)
-    max_users = float(max_values.get('unique_users', 1) or 1)
-    users_score = (unique_users / max_users) * 100 if max_users > 0 else 0
+    # 2. Resolution Rate (35%) - from spill detection
+    # If resolution_rate is None (before spill tracking started), use neutral 50%
+    res_rate = float(resolution_rate) if resolution_rate is not None else 50.0
 
-    # Response Time Score (inverse - lower is better)
-    if avg_rt <= 300:  # 5 minutes
-        rt_score = 100
-    elif avg_rt <= 900:  # 15 minutes
-        rt_score = 100 - ((avg_rt - 300) / 600) * 25
-    elif avg_rt <= 1800:  # 30 minutes
-        rt_score = 75 - ((avg_rt - 900) / 900) * 25
-    elif avg_rt <= 3600:  # 60 minutes
-        rt_score = 50 - ((avg_rt - 1800) / 1800) * 25
-    else:
-        rt_score = max(0, 25 - ((avg_rt - 3600) / 3600) * 25)
+    # 3. Productivity Score (25%) - messages sent per day vs team average
+    # This measures actual individual work, not shared page stats
+    msgs_per_day = total_sent / max(days_present, 1)
+    avg_msgs_per_day = float(max_values.get('avg_msgs_per_day', 1) or 1)
+    prod_score = calculate_productivity_score(msgs_per_day, avg_msgs_per_day)
 
-    # Attendance Score
-    att_score = attendance_rate
-
-    # Weighted total
+    # Weighted total using QA_WEIGHTS from config
     total_score = (
-        SCORE_WEIGHTS['qa_score'] * qa_score +
-        SCORE_WEIGHTS['unique_users'] * users_score +
-        SCORE_WEIGHTS['response_time'] * rt_score +
-        SCORE_WEIGHTS['attendance'] * att_score
+        QA_WEIGHTS['response_time'] * rt_score +
+        QA_WEIGHTS['resolution_rate'] * res_rate +
+        QA_WEIGHTS['productivity'] * prod_score
     )
 
     return round(float(total_score), 1)
@@ -343,14 +434,14 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Scoring info
-    st.subheader("Scoring Weights")
+    # Scoring info (using QA_WEIGHTS from config)
+    st.subheader("QA Scoring Formula")
     st.markdown(f"""
-    - **QA Score**: {int(SCORE_WEIGHTS['qa_score']*100)}%
-    - **Unique Users**: {int(SCORE_WEIGHTS['unique_users']*100)}%
-    - **Response Time**: {int(SCORE_WEIGHTS['response_time']*100)}%
-    - **Attendance**: {int(SCORE_WEIGHTS['attendance']*100)}%
+    - **Response Time**: {int(QA_WEIGHTS['response_time']*100)}% - Speed of replies
+    - **Resolution Rate**: {int(QA_WEIGHTS['resolution_rate']*100)}% - Proper conversation closings
+    - **Productivity**: {int(QA_WEIGHTS['productivity']*100)}% - Messages sent per day vs team avg
     """)
+    st.caption("Productivity = (Your Msgs/Day ÷ Team Avg) × 100")
 
     st.markdown("---")
 
@@ -362,6 +453,13 @@ with st.sidebar:
     - 🥉 Bronze: {TIER_THRESHOLDS['bronze']}+
     """)
 
+# Get page filter from session state (set in app.py)
+page_filter_sql = st.session_state.get('page_filter_sql', CORE_PAGES_SQL)
+page_filter_name = st.session_state.get('page_filter_name', 'All Pages')
+
+# Show current filter
+st.info(f"Showing data for: **{page_filter_name}**")
+
 # Load data
 df = get_agent_stats(start_date, end_date)
 
@@ -369,14 +467,51 @@ if df.empty:
     st.warning("No agent data found for the selected period.")
     st.stop()
 
+# Load resolution rates (spill detection)
+resolution_df = get_resolution_rates(start_date, end_date, page_filter_sql)
+
+# Check if we're in spill tracking period
+spill_start = datetime.strptime(SPILL_START_DATE, "%Y-%m-%d").date()
+is_spill_period = end_date >= spill_start
+
+# Merge resolution rates with agent data
+if not resolution_df.empty and is_spill_period:
+    df = df.merge(resolution_df[['agent_name', 'resolution_rate', 'resolved_conversations', 'total_conversations']],
+                  on='agent_name', how='left')
+    df['resolution_rate'] = df['resolution_rate'].fillna(0)
+else:
+    # Before spill tracking: use None so calculate_performance_score uses 50% neutral
+    df['resolution_rate'] = None
+    df['resolved_conversations'] = 0
+    df['total_conversations'] = 0
+
+if not is_spill_period:
+    st.info(f"Spill tracking starts {SPILL_START_DATE}. Resolution scores use neutral 50% for earlier dates.")
+
+# Calculate messages per day for productivity scoring
+df['msgs_per_day'] = df.apply(
+    lambda row: float(row['total_sent'] or 0) / max(float(row['days_present'] or 1), 1),
+    axis=1
+)
+
 # Calculate max values for normalization
 max_values = {
-    'unique_users': df['unique_users'].max() if 'unique_users' in df.columns else 1
+    'unique_users': df['unique_users'].max() if 'unique_users' in df.columns else 1,
+    'avg_unique_users': df['unique_users'].mean() if 'unique_users' in df.columns else 1,
+    'avg_msgs_per_day': df['msgs_per_day'].mean() if 'msgs_per_day' in df.columns else 1
 }
 
 # Calculate scores and tiers
 df['qa_score'] = df.apply(lambda row: calculate_qa_score(row['avg_rt']), axis=1)
-df['score'] = df.apply(lambda row: calculate_performance_score(row, max_values), axis=1)
+df['rt_score'] = df.apply(lambda row: calculate_response_time_score(row['avg_rt']), axis=1)
+df['productivity_score'] = df.apply(
+    lambda row: calculate_productivity_score(float(row['msgs_per_day'] or 0), max_values['avg_msgs_per_day']),
+    axis=1
+)
+df['score'] = df.apply(
+    lambda row: calculate_performance_score(row, max_values, row.get('resolution_rate')),
+    axis=1
+)
 df['tier'] = df['score'].apply(get_tier)
 
 # Sort by score
@@ -385,7 +520,7 @@ df['rank'] = df.index + 1
 
 # Summary stats
 st.subheader("📊 Summary")
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
     st.metric("Total Agents", len(df))
@@ -399,8 +534,17 @@ with col3:
     st.metric("Avg Score", f"{avg_score:.1f}")
 
 with col4:
-    avg_qa = df['qa_score'].mean()
-    st.metric("Avg QA Score", f"{avg_qa:.1f}")
+    avg_rt = df['rt_score'].mean()
+    st.metric("Avg RT Score", f"{avg_rt:.1f}", help="Response Time Score (40%)")
+
+with col5:
+    # Handle None resolution values (before spill tracking)
+    valid_res = df['resolution_rate'].dropna()
+    if not valid_res.empty:
+        avg_resolution = valid_res.mean()
+        st.metric("Avg Resolution", f"{avg_resolution:.1f}%", help="Resolution Rate from Spill (35%)")
+    else:
+        st.metric("Avg Resolution", "N/A", help="Spill tracking starts " + SPILL_START_DATE)
 
 st.markdown("---")
 
@@ -410,11 +554,13 @@ tab1, tab2, tab3, tab4 = st.tabs(["🏆 Overall Rankings", "📊 By Tier", "⏱�
 with tab1:
     st.subheader("Overall Rankings")
 
-    # Create display dataframe
-    display_df = df[['rank', 'agent_name', 'score', 'tier', 'qa_score', 'unique_users', 'avg_rt', 'attendance_rate']].copy()
+    # Create display dataframe with new metrics
+    display_df = df[['rank', 'agent_name', 'score', 'tier', 'rt_score', 'resolution_rate', 'productivity_score', 'msgs_per_day', 'avg_rt']].copy()
     display_df['tier_badge'] = display_df['tier'].apply(lambda x: TIER_BADGES.get(x, '📊'))
-    display_df['qa_rating'] = display_df['qa_score'].apply(lambda x: get_qa_rating(x)[1])
     display_df['avg_rt_display'] = display_df['avg_rt'].apply(lambda x: format_rt(x) if x else 'N/A')
+    display_df['msgs_per_day_display'] = display_df['msgs_per_day'].apply(lambda x: f"{x:.1f}" if x else '0')
+    # Handle None resolution_rate (before spill tracking)
+    display_df['resolution_display'] = display_df['resolution_rate'].apply(lambda x: f"{x:.1f}%" if x is not None else 'N/A')
 
     # Format for display
     display_df = display_df.rename(columns={
@@ -422,23 +568,24 @@ with tab1:
         'agent_name': 'Agent',
         'score': 'Score',
         'tier_badge': 'Tier',
-        'qa_score': 'QA Score',
-        'qa_rating': 'QA',
-        'unique_users': 'Unique Users',
-        'avg_rt_display': 'Avg RT',
-        'attendance_rate': 'Attendance'
+        'rt_score': 'RT Score',
+        'resolution_display': 'Resolution',
+        'productivity_score': 'Productivity',
+        'msgs_per_day_display': 'Msgs/Day',
+        'avg_rt_display': 'Avg RT'
     })
 
-    display_cols = ['Rank', 'Tier', 'Agent', 'Score', 'QA', 'QA Score', 'Unique Users', 'Avg RT', 'Attendance']
+    display_cols = ['Rank', 'Tier', 'Agent', 'Score', 'RT Score', 'Resolution', 'Productivity', 'Msgs/Day', 'Avg RT']
     st.dataframe(
         display_df[display_cols],
         hide_index=True,
         width="stretch",
         column_config={
             "Score": st.column_config.NumberColumn(format="%.1f"),
-            "QA Score": st.column_config.NumberColumn(format="%.1f"),
-            "Unique Users": st.column_config.NumberColumn(format="%d"),
-            "Attendance": st.column_config.NumberColumn(format="%.1f%%")
+            "RT Score": st.column_config.NumberColumn(format="%.1f"),
+            "Resolution %": st.column_config.NumberColumn(format="%.1f"),
+            "Productivity": st.column_config.NumberColumn(format="%.1f"),
+            "Unique Users": st.column_config.NumberColumn(format="%d")
         }
     )
 
@@ -488,7 +635,10 @@ with tab3:
     # Response time chart
     st.subheader("Response Time by Agent")
 
-    chart_df = df.nsmallest(15, 'avg_rt').copy()
+    # Convert avg_rt to numeric and filter out None/NaN values for chart
+    df_with_rt = df[df['avg_rt'].notna()].copy()
+    df_with_rt['avg_rt'] = pd.to_numeric(df_with_rt['avg_rt'], errors='coerce')
+    chart_df = df_with_rt.nsmallest(15, 'avg_rt').copy()
     chart_df['avg_rt_min'] = chart_df['avg_rt'] / 60  # Convert to minutes
 
     fig = px.bar(

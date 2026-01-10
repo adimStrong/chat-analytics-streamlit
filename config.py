@@ -21,6 +21,27 @@ CORE_PAGES = [
 CORE_PAGES_SQL = tuple(CORE_PAGES)
 
 # ============================================
+# PAGE CATEGORIES (for toggle filter)
+# ============================================
+# Live Stream pages (with "Live Stream" in name)
+LIVESTREAM_PAGES = [
+    "Juan365 Live Stream",
+    "Juan365 Livestream"
+]
+LIVESTREAM_PAGES_SQL = tuple(LIVESTREAM_PAGES)
+
+# Social Media pages (without Live Stream)
+SOCMED_PAGES = [
+    "Juan365",
+    "Juanbingo",
+    "Juancares",
+    "Juan365 Cares",
+    "Juansports",
+    "Juan365 Studios"
+]
+SOCMED_PAGES_SQL = tuple(SOCMED_PAGES)
+
+# ============================================
 # TIMEZONE CONFIGURATION
 # ============================================
 TIMEZONE = "Asia/Manila"
@@ -163,4 +184,43 @@ ALERT_SEVERITY = {
         "background": "#eff6ff",
         "priority": 3
     }
+}
+
+# ============================================
+# SPILL DETECTION (Closing Message Keywords)
+# ============================================
+# Keywords that indicate a conversation was properly closed (case-insensitive)
+# Spill tracking starts from January 11, 2026
+SPILL_START_DATE = "2026-01-11"
+
+SPILL_KEYWORDS = [
+    "good luck po",
+    "play responsibly",
+    "thank you for reaching out",
+    "happy to assist",
+    "don't hesitate to contact",
+    "juankada",
+    "stay in control",
+    "play smart",
+    "let us know if you need",
+    "play only what you can afford",
+    "gaming should be fun"
+]
+
+# ============================================
+# QA SCORING WEIGHTS (Industry Standard)
+# ============================================
+QA_WEIGHTS = {
+    'response_time': 0.40,      # 40% - How fast agents respond
+    'resolution_rate': 0.35,    # 35% - % of conversations closed with spill keywords
+    'productivity': 0.25        # 25% - Messages sent per day vs team average
+}
+
+# Response Time Scoring Thresholds (in seconds)
+QA_RESPONSE_THRESHOLDS = {
+    'excellent': {'max_seconds': 300, 'score': 100},    # < 5 min = 100 pts
+    'good': {'max_seconds': 900, 'score': 80},          # 5-15 min = 80 pts
+    'average': {'max_seconds': 1800, 'score': 60},      # 15-30 min = 60 pts
+    'below_average': {'max_seconds': 3600, 'score': 40}, # 30-60 min = 40 pts
+    'poor': {'max_seconds': float('inf'), 'score': 20}  # > 60 min = 20 pts
 }

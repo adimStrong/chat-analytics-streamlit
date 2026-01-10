@@ -10,7 +10,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 # Import shared modules
-from config import CORE_PAGES, CORE_PAGES_SQL, TIMEZONE, CACHE_TTL, COLORS
+from config import (
+    CORE_PAGES, CORE_PAGES_SQL, TIMEZONE, CACHE_TTL, COLORS,
+    LIVESTREAM_PAGES_SQL, SOCMED_PAGES_SQL,
+    QA_WEIGHTS, QA_RESPONSE_THRESHOLDS, SPILL_KEYWORDS, SPILL_START_DATE
+)
 from db_utils import get_simple_connection as get_connection
 from utils import format_number, format_rt
 
@@ -26,8 +30,8 @@ st.set_page_config(
 # ============================================
 
 @st.cache_data(ttl=CACHE_TTL["default"])
-def get_period_metrics(start_date, end_date):
-    """Get key metrics for a date period"""
+def get_period_metrics(start_date, end_date, page_filter_sql):
+    """Get key metrics for a date period with page filter"""
     conn = get_connection()
     cur = conn.cursor()
 
@@ -53,7 +57,7 @@ def get_period_metrics(start_date, end_date):
         LEFT JOIN first_messages fm ON m.sender_id = fm.sender_id
         WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
           AND p.page_name IN %s
-    """, (CORE_PAGES_SQL, start_date, end_date, start_date, end_date, CORE_PAGES_SQL))
+    """, (page_filter_sql, start_date, end_date, start_date, end_date, page_filter_sql))
     msg_row = cur.fetchone()
 
     # Comments metrics
@@ -65,21 +69,38 @@ def get_period_metrics(start_date, end_date):
         JOIN pages p ON c.page_id = p.page_id
         WHERE (c.comment_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
           AND p.page_name IN %s
-    """, (start_date, end_date, CORE_PAGES_SQL))
+    """, (start_date, end_date, page_filter_sql))
     cmt_row = cur.fetchone()
 
-    # Response time from sessions
+    # Response time from messages (fallback to sessions if no message RT data)
     cur.execute("""
         SELECT
-            AVG(s.avg_response_time_seconds) FILTER (WHERE s.avg_response_time_seconds > 10) as avg_human_rt,
-            COUNT(DISTINCT s.conversation_id) as unique_convos
-        FROM sessions s
-        JOIN pages p ON s.page_id = p.page_id
-        WHERE (s.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+            AVG(m.response_time_seconds) FILTER (WHERE m.response_time_seconds > 10) as avg_human_rt,
+            COUNT(DISTINCT m.conversation_id) as unique_convos
+        FROM messages m
+        JOIN pages p ON m.page_id = p.page_id
+        WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
           AND p.page_name IN %s
-          AND s.avg_response_time_seconds > 0
-    """, (start_date, end_date, CORE_PAGES_SQL))
-    session_row = cur.fetchone()
+          AND m.is_from_page = true
+          AND m.response_time_seconds > 0
+    """, (start_date, end_date, page_filter_sql))
+    msg_rt_row = cur.fetchone()
+
+    # Fallback to sessions if messages have no response time data
+    if msg_rt_row[0] is None:
+        cur.execute("""
+            SELECT
+                AVG(s.avg_response_time_seconds) FILTER (WHERE s.avg_response_time_seconds > 10) as avg_human_rt,
+                COUNT(DISTINCT s.conversation_id) as unique_convos
+            FROM sessions s
+            JOIN pages p ON s.page_id = p.page_id
+            WHERE (s.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+              AND p.page_name IN %s
+              AND s.avg_response_time_seconds > 0
+        """, (start_date, end_date, page_filter_sql))
+        session_row = cur.fetchone()
+    else:
+        session_row = msg_rt_row
 
     cur.close()
     conn.close()
@@ -100,8 +121,8 @@ def get_period_metrics(start_date, end_date):
     }
 
 @st.cache_data(ttl=CACHE_TTL["default"])
-def get_daily_trend(start_date, end_date):
-    """Get daily message trend for chart"""
+def get_daily_trend(start_date, end_date, page_filter_sql):
+    """Get daily message trend for chart with page filter"""
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("""
@@ -115,7 +136,7 @@ def get_daily_trend(start_date, end_date):
           AND p.page_name IN %s
         GROUP BY date
         ORDER BY date
-    """, (start_date, end_date, CORE_PAGES_SQL))
+    """, (start_date, end_date, page_filter_sql))
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -156,36 +177,134 @@ def get_agent_alerts(start_date, end_date):
     conn.close()
     return pd.DataFrame(rows, columns=['Agent', 'Date', 'Shift', 'Status', 'Msg Recv', 'Msg Sent', 'Response %', 'Avg RT'])
 
+def calculate_response_time_score(avg_rt_seconds):
+    """Calculate response time score based on thresholds"""
+    if avg_rt_seconds is None or avg_rt_seconds <= 0:
+        return 50.0  # Default score when no data
+    for tier, config in QA_RESPONSE_THRESHOLDS.items():
+        if avg_rt_seconds <= config['max_seconds']:
+            return float(config['score'])
+    return 20.0  # Poor score for very slow responses
+
+def calculate_productivity_score(unique_users, avg_unique_users):
+    """Calculate productivity score relative to team average"""
+    if avg_unique_users <= 0:
+        return 50.0
+    score = (unique_users / avg_unique_users) * 100
+    return min(100.0, score)
+
+def build_spill_sql_conditions():
+    """Build SQL OR conditions for spill keyword detection"""
+    conditions = []
+    for keyword in SPILL_KEYWORDS:
+        escaped = keyword.replace("'", "''")
+        conditions.append(f"LOWER(m.message_text) LIKE '%{escaped.lower()}%'")
+    return " OR ".join(conditions)
+
 @st.cache_data(ttl=CACHE_TTL["default"])
-def get_top_performers(start_date, end_date, limit=5):
-    """Get top performing agents"""
+def get_top_performers(start_date, end_date, page_filter_sql, limit=5):
+    """Get top performing agents by QA Score"""
+    from datetime import datetime
+
     conn = get_connection()
     cur = conn.cursor()
+
+    # Get base agent stats (only count when present)
     cur.execute("""
         SELECT
             a.agent_name,
-            SUM(ads.messages_received) as total_recv,
-            SUM(ads.messages_sent) as total_sent,
-            CASE
-                WHEN SUM(ads.messages_received) > 0
-                THEN ROUND((100.0 * SUM(ads.messages_sent) / SUM(ads.messages_received))::numeric, 1)
-                ELSE 0
-            END as response_rate,
-            AVG(ads.avg_response_time_seconds) FILTER (WHERE ads.avg_response_time_seconds > 0) as avg_rt,
+            a.id as agent_id,
+            SUM(ads.messages_received) FILTER (WHERE ads.schedule_status = 'present') as total_recv,
+            SUM(ads.messages_sent) FILTER (WHERE ads.schedule_status = 'present') as total_sent,
+            AVG(ads.avg_response_time_seconds) FILTER (WHERE ads.avg_response_time_seconds > 10 AND ads.schedule_status = 'present') as avg_rt,
             COUNT(DISTINCT ads.date) FILTER (WHERE ads.schedule_status = 'present') as days_present
         FROM agents a
         JOIN agent_daily_stats ads ON a.id = ads.agent_id
         WHERE ads.date BETWEEN %s AND %s
           AND a.is_active = true
-        GROUP BY a.agent_name
-        HAVING SUM(ads.messages_received) > 0
-        ORDER BY response_rate DESC, total_sent DESC
-        LIMIT %s
-    """, (start_date, end_date, limit))
-    rows = cur.fetchall()
+        GROUP BY a.agent_name, a.id
+        HAVING SUM(ads.messages_received) FILTER (WHERE ads.schedule_status = 'present') > 0
+    """, (start_date, end_date))
+    agent_rows = cur.fetchall()
+
+    if not agent_rows:
+        cur.close()
+        conn.close()
+        return pd.DataFrame(columns=['Agent', 'QA Score', 'Msg Recv', 'Msg Sent', 'Avg RT', 'Days Present'])
+
+    # Calculate team average messages for productivity scoring (using messages_sent as proxy)
+    total_sent = sum(row[3] or 0 for row in agent_rows)
+    avg_messages = total_sent / len(agent_rows) if agent_rows else 1
+
+    # Get resolution rates (spill detection) if date range includes spill tracking period
+    spill_start = datetime.strptime(SPILL_START_DATE, "%Y-%m-%d").date()
+    resolution_rates = {}
+
+    if end_date >= spill_start:
+        effective_start = max(start_date, spill_start)
+        spill_conditions = build_spill_sql_conditions()
+
+        cur.execute(f"""
+            SELECT
+                a.agent_name,
+                COUNT(DISTINCT c.conversation_id) as total_convos,
+                COUNT(DISTINCT CASE WHEN ({spill_conditions}) THEN c.conversation_id END) as resolved_convos
+            FROM agents a
+            JOIN agent_page_assignments apa ON a.id = apa.agent_id
+            JOIN pages p ON apa.page_id = p.page_id
+            JOIN conversations c ON p.page_id = c.page_id
+            JOIN messages m ON c.conversation_id = m.conversation_id
+            WHERE c.last_message_time >= %s AND c.last_message_time < %s + INTERVAL '1 day'
+              AND p.page_name IN %s
+              AND m.is_from_page = true
+              AND a.is_active = true
+            GROUP BY a.agent_name
+        """, (effective_start, end_date, page_filter_sql))
+
+        for row in cur.fetchall():
+            agent_name, total_convos, resolved_convos = row
+            if total_convos and total_convos > 0:
+                resolution_rates[agent_name] = (resolved_convos / total_convos) * 100
+            else:
+                resolution_rates[agent_name] = 50.0
+
+    # Calculate QA scores for each agent
+    results = []
+    for row in agent_rows:
+        agent_name, agent_id, total_recv, total_sent, avg_rt, days_present = row
+
+        # Response Time Score (40%)
+        rt_score = calculate_response_time_score(avg_rt)
+
+        # Resolution Rate (35%)
+        res_rate = resolution_rates.get(agent_name, 50.0)
+
+        # Productivity Score (25%) - based on messages sent relative to team average
+        prod_score = calculate_productivity_score(total_sent or 0, avg_messages)
+
+        # Combined QA Score
+        qa_score = (
+            QA_WEIGHTS['response_time'] * rt_score +
+            QA_WEIGHTS['resolution_rate'] * res_rate +
+            QA_WEIGHTS['productivity'] * prod_score
+        )
+
+        results.append({
+            'Agent': agent_name,
+            'QA Score': round(qa_score, 1),
+            'Msg Recv': total_recv or 0,
+            'Msg Sent': total_sent or 0,
+            'Avg RT': avg_rt,
+            'Days Present': days_present or 0
+        })
+
     cur.close()
     conn.close()
-    return pd.DataFrame(rows, columns=['Agent', 'Msg Recv', 'Msg Sent', 'Response %', 'Avg RT', 'Days Present'])
+
+    # Sort by QA Score descending and limit
+    df = pd.DataFrame(results)
+    df = df.sort_values('QA Score', ascending=False).head(limit)
+    return df
 
 # ============================================
 # HELPER FUNCTIONS
@@ -223,13 +342,16 @@ def display_metric_with_comparison(label, current, previous, format_func=None, h
 # MAIN APP
 # ============================================
 
+# Get page filter name for display
+page_filter_display = st.session_state.get('page_filter_name', 'All Pages')
+
 # Logo and Title
 col_logo, col_title = st.columns([0.08, 0.92])
 with col_logo:
     st.image("Juan365.jpg", width=60)
 with col_title:
     st.title("Executive Dashboard")
-    st.caption(f"Performance overview for core pages | Generated: {date.today().strftime('%B %d, %Y')}")
+    st.caption(f"Performance overview ({page_filter_display}) | Generated: {date.today().strftime('%B %d, %Y')}")
 
 st.markdown("---")
 
@@ -260,13 +382,28 @@ with st.sidebar:
     st.caption(f"Previous: {prev_start_date} to {prev_end_date}")
 
     st.markdown("---")
-    st.subheader("Core Pages")
-    for page in CORE_PAGES:
+
+    # Show filtered pages info
+    page_filter_name = st.session_state.get('page_filter_name', 'All Pages')
+    st.subheader(f"Showing: {page_filter_name}")
+
+    # Get the page list based on filter
+    if page_filter_name == "Live Stream":
+        page_list = list(LIVESTREAM_PAGES_SQL)
+    elif page_filter_name == "Socmed":
+        page_list = list(SOCMED_PAGES_SQL)
+    else:
+        page_list = CORE_PAGES
+
+    for page in page_list:
         st.caption(f"- {page}")
 
+# Get page filter from session state
+page_filter_sql = st.session_state.get('page_filter_sql', CORE_PAGES_SQL)
+
 # Get data for both periods
-current_metrics = get_period_metrics(start_date, end_date)
-previous_metrics = get_period_metrics(prev_start_date, prev_end_date)
+current_metrics = get_period_metrics(start_date, end_date, page_filter_sql)
+previous_metrics = get_period_metrics(prev_start_date, prev_end_date, page_filter_sql)
 
 # ============================================
 # KPI CARDS WITH COMPARISON
@@ -357,7 +494,7 @@ col_chart, col_alerts = st.columns([2, 1])
 with col_chart:
     st.subheader("Message Trend")
 
-    trend_data = get_daily_trend(start_date, end_date)
+    trend_data = get_daily_trend(start_date, end_date, page_filter_sql)
 
     if not trend_data.empty:
         fig = go.Figure()
@@ -419,11 +556,11 @@ with col_alerts:
 st.markdown("---")
 
 # ============================================
-# TOP PERFORMERS
+# TOP PERFORMERS (by QA Score)
 # ============================================
-st.subheader("Top Performers")
+st.subheader("Top Performers by QA Score")
 
-top_agents = get_top_performers(start_date, end_date)
+top_agents = get_top_performers(start_date, end_date, page_filter_sql)
 
 if not top_agents.empty:
     col1, col2 = st.columns([2, 1])
@@ -434,26 +571,26 @@ if not top_agents.empty:
         medals = ['🥇', '🥈', '🥉', '4th', '5th']
         top_display.insert(0, 'Rank', [medals[i] if i < 3 else medals[i] for i in range(len(top_display))])
         top_display['Avg RT'] = top_display['Avg RT'].apply(format_rt)
-        top_display['Response %'] = top_display['Response %'].apply(lambda x: f"{x:.1f}%")
+        top_display['QA Score'] = top_display['QA Score'].apply(lambda x: f"{x:.1f}")
 
         for col in ['Msg Recv', 'Msg Sent', 'Days Present']:
             top_display[col] = top_display[col].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "0")
 
-        st.dataframe(top_display, hide_index=True, width="stretch")
+        st.dataframe(top_display, hide_index=True, use_container_width=True)
 
     with col2:
-        # Bar chart of top performers
+        # Bar chart of top performers by QA Score
         fig = px.bar(
             top_agents.head(5),
             x='Agent',
-            y='Response %',
-            title='Response Rate by Agent',
-            color='Response %',
+            y='QA Score',
+            title='QA Score by Agent',
+            color='QA Score',
             color_continuous_scale=['#ef4444', '#f59e0b', '#10b981']
         )
         fig.update_layout(height=250, showlegend=False, margin=dict(l=0, r=0, t=30, b=0))
         fig.update_coloraxes(showscale=False)
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("No agent performance data for selected period")
 

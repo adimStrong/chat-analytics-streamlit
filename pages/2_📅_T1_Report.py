@@ -11,7 +11,10 @@ import plotly.graph_objects as go
 import io
 
 # Import shared modules
-from config import CORE_PAGES, CORE_PAGES_SQL, TIMEZONE, CACHE_TTL, COLORS
+from config import (
+    CORE_PAGES, CORE_PAGES_SQL, TIMEZONE, CACHE_TTL, COLORS,
+    LIVESTREAM_PAGES_SQL, SOCMED_PAGES_SQL
+)
 from db_utils import get_simple_connection as get_connection
 from utils import format_number, format_rt, style_status
 
@@ -25,6 +28,10 @@ st.set_page_config(
 # Get yesterday's date (T+1 reporting)
 today = date.today()
 default_date = today - timedelta(days=1)
+
+# Get page filter from session state
+page_filter_sql = st.session_state.get('page_filter_sql', CORE_PAGES_SQL)
+page_filter_name = st.session_state.get('page_filter_name', 'All Pages')
 
 # ============================================
 # SIDEBAR - DATE RANGE SELECTION
@@ -84,6 +91,19 @@ with st.sidebar:
         prev_end_date = None
 
     st.markdown("---")
+
+    # Show filtered pages info
+    st.subheader(f"Showing: {page_filter_name}")
+    if page_filter_name == "Live Stream":
+        page_list = list(LIVESTREAM_PAGES_SQL)
+    elif page_filter_name == "Socmed":
+        page_list = list(SOCMED_PAGES_SQL)
+    else:
+        page_list = CORE_PAGES
+    for page in page_list:
+        st.caption(f"- {page}")
+
+    st.markdown("---")
     st.subheader("📥 Export Report")
 
 # Helper function for calculating change
@@ -103,7 +123,7 @@ with col_title:
         st.markdown(f"## Daily Report &nbsp;&nbsp; | &nbsp;&nbsp; {date_label}")
     else:
         st.markdown(f"## Daily Report &nbsp;&nbsp; | &nbsp;&nbsp; {date_label}")
-    st.caption(f"Generated: {today.strftime('%B %d, %Y')} | All times in Philippine Time (UTC+8)")
+    st.caption(f"Showing: {page_filter_name} | Generated: {today.strftime('%B %d, %Y')} | All times in Philippine Time (UTC+8)")
 
 st.markdown("---")
 
@@ -117,8 +137,9 @@ cur = conn.cursor()
 cur.execute("""
     WITH first_messages AS (
         SELECT sender_id, MIN(message_time) as first_msg_time
-        FROM messages
-        WHERE is_from_page = false
+        FROM messages m
+        JOIN pages p ON m.page_id = p.page_id
+        WHERE is_from_page = false AND p.page_name IN %s
         GROUP BY sender_id
     )
     SELECT
@@ -130,19 +151,23 @@ cur.execute("""
             THEN m.sender_id
         END) as new_chats
     FROM messages m
+    JOIN pages p ON m.page_id = p.page_id
     LEFT JOIN first_messages fm ON m.sender_id = fm.sender_id
     WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
-""", (from_date, to_date, from_date, to_date))
+      AND p.page_name IN %s
+""", (page_filter_sql, from_date, to_date, from_date, to_date, page_filter_sql))
 msg_row = cur.fetchone()
 msg_recv, msg_sent, unique_users, new_chats = msg_row if msg_row else (0, 0, 0, 0)
 
 # Comments summary (removed Comments Received)
 cur.execute("""
     SELECT
-        COUNT(*) FILTER (WHERE author_id IS NOT NULL AND author_id = page_id) as replies
-    FROM comments
-    WHERE (comment_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
-""", (from_date, to_date))
+        COUNT(*) FILTER (WHERE c.author_id IS NOT NULL AND c.author_id = c.page_id) as replies
+    FROM comments c
+    JOIN pages p ON c.page_id = p.page_id
+    WHERE (c.comment_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+      AND p.page_name IN %s
+""", (from_date, to_date, page_filter_sql))
 cmt_row = cur.fetchone()
 cmt_reply = cmt_row[0] if cmt_row else 0
 
@@ -158,8 +183,9 @@ if enable_comparison and prev_start_date and prev_end_date:
     cur.execute("""
         WITH first_messages AS (
             SELECT sender_id, MIN(message_time) as first_msg_time
-            FROM messages
-            WHERE is_from_page = false
+            FROM messages m
+            JOIN pages p ON m.page_id = p.page_id
+            WHERE is_from_page = false AND p.page_name IN %s
             GROUP BY sender_id
         )
         SELECT
@@ -171,19 +197,23 @@ if enable_comparison and prev_start_date and prev_end_date:
                 THEN m.sender_id
             END) as new_chats
         FROM messages m
+        JOIN pages p ON m.page_id = p.page_id
         LEFT JOIN first_messages fm ON m.sender_id = fm.sender_id
         WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
-    """, (prev_start_date, prev_end_date, prev_start_date, prev_end_date))
+          AND p.page_name IN %s
+    """, (page_filter_sql, prev_start_date, prev_end_date, prev_start_date, prev_end_date, page_filter_sql))
     prev_msg_row = cur.fetchone()
     prev_msg_recv, prev_msg_sent, prev_unique_users, prev_new_chats = prev_msg_row if prev_msg_row else (0, 0, 0, 0)
 
     # Previous period comments
     cur.execute("""
         SELECT
-            COUNT(*) FILTER (WHERE author_id IS NOT NULL AND author_id = page_id) as replies
-        FROM comments
-        WHERE (comment_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
-    """, (prev_start_date, prev_end_date))
+            COUNT(*) FILTER (WHERE c.author_id IS NOT NULL AND c.author_id = c.page_id) as replies
+        FROM comments c
+        JOIN pages p ON c.page_id = p.page_id
+        WHERE (c.comment_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+          AND p.page_name IN %s
+    """, (prev_start_date, prev_end_date, page_filter_sql))
     prev_cmt_row = cur.fetchone()
     prev_cmt_reply = prev_cmt_row[0] if prev_cmt_row else 0
 
@@ -333,16 +363,16 @@ cur.execute("""
         s.shift as "Shift",
         s.schedule_status as "Status",
         s.duty_hours as "Hours",
-        CASE WHEN s.schedule_status = 'off' THEN 0 ELSE COALESCE(nc.new_chats, 0) END as "New Chats",
-        CASE WHEN s.schedule_status = 'off' THEN 0 ELSE COALESCE(uu.unique_users, 0) END as "Unique Users",
-        CASE WHEN s.schedule_status = 'off' THEN 0 ELSE SUM(s.messages_received) END as "Msg Recv",
-        CASE WHEN s.schedule_status = 'off' THEN 0 ELSE SUM(s.messages_sent) END as "Msg Sent",
-        CASE WHEN s.schedule_status = 'off' THEN 0 ELSE SUM(s.comment_replies) END as "Comments",
-        CASE WHEN s.schedule_status = 'off' THEN 0
+        CASE WHEN s.schedule_status != 'present' THEN 0 ELSE COALESCE(nc.new_chats, 0) END as "New Chats",
+        CASE WHEN s.schedule_status != 'present' THEN 0 ELSE COALESCE(uu.unique_users, 0) END as "Unique Users",
+        CASE WHEN s.schedule_status != 'present' THEN 0 ELSE SUM(s.messages_received) END as "Msg Recv",
+        CASE WHEN s.schedule_status != 'present' THEN 0 ELSE SUM(s.messages_sent) END as "Msg Sent",
+        CASE WHEN s.schedule_status != 'present' THEN 0 ELSE SUM(s.comment_replies) END as "Comments",
+        CASE WHEN s.schedule_status != 'present' THEN 0
              WHEN SUM(s.messages_received) > 0 THEN ROUND(100.0 * SUM(s.messages_sent) / SUM(s.messages_received), 1)
              ELSE 0 END as "Response %%",
-        CASE WHEN s.schedule_status = 'off' THEN NULL ELSE ROUND(AVG(s.avg_response_time_seconds)::numeric, 1) END as "Avg RT",
-        CASE WHEN s.schedule_status = 'off' THEN NULL ELSE ROUND(AVG(hrt.human_response_time)::numeric, 1) END as "Human RT",
+        CASE WHEN s.schedule_status != 'present' THEN NULL ELSE ROUND(AVG(s.avg_response_time_seconds)::numeric, 1) END as "Avg RT",
+        CASE WHEN s.schedule_status != 'present' THEN NULL ELSE ROUND(AVG(hrt.human_response_time)::numeric, 1) END as "Human RT",
         COALESCE(att.days_present, 0) as "Days Present",
         COALESCE(att.total_scheduled_days, 0) as "Total Days"
     FROM agent_daily_stats s
@@ -492,8 +522,9 @@ st.subheader("🕐 Performance by Shift")
 cur.execute("""
     WITH first_messages AS (
         SELECT sender_id, MIN(message_time) as first_msg_time
-        FROM messages
-        WHERE is_from_page = false
+        FROM messages m
+        JOIN pages p ON m.page_id = p.page_id
+        WHERE is_from_page = false AND p.page_name IN %s
         GROUP BY sender_id
     ),
     msg_shift AS (
@@ -507,8 +538,10 @@ cur.execute("""
                 ELSE 'Evening (10pm-6am)'
             END as shift
         FROM messages m
+        JOIN pages p ON m.page_id = p.page_id
         LEFT JOIN first_messages fm ON m.sender_id = fm.sender_id
         WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+          AND p.page_name IN %s
     )
     SELECT
         shift,
@@ -527,7 +560,7 @@ cur.execute("""
         WHEN 'Mid (2pm-10pm)' THEN 2
         ELSE 3
     END
-""", (from_date, to_date, from_date, to_date))
+""", (page_filter_sql, from_date, to_date, page_filter_sql, from_date, to_date))
 shift_data = cur.fetchall()
 
 if shift_data:
@@ -566,8 +599,9 @@ st.subheader("📄 Top Pages Performance")
 cur.execute("""
     WITH first_messages AS (
         SELECT sender_id, MIN(message_time) as first_msg_time
-        FROM messages
-        WHERE is_from_page = false
+        FROM messages m
+        JOIN pages p ON m.page_id = p.page_id
+        WHERE is_from_page = false AND p.page_name IN %s
         GROUP BY sender_id
     )
     SELECT
@@ -583,11 +617,12 @@ cur.execute("""
     JOIN pages p ON m.page_id = p.page_id
     LEFT JOIN first_messages fm ON m.sender_id = fm.sender_id
     WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+      AND p.page_name IN %s
     GROUP BY p.page_name
     HAVING COUNT(*) FILTER (WHERE m.is_from_page = false) > 0
     ORDER BY received DESC
     LIMIT 10
-""", (from_date, to_date, from_date, to_date))
+""", (page_filter_sql, from_date, to_date, from_date, to_date, page_filter_sql))
 page_data = cur.fetchall()
 
 if page_data:
@@ -623,14 +658,16 @@ st.subheader("⏰ Hourly Message Trend")
 
 cur.execute("""
     SELECT
-        EXTRACT(HOUR FROM (message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila'))::int as hour,
-        COUNT(*) FILTER (WHERE is_from_page = false) as received,
-        COUNT(*) FILTER (WHERE is_from_page = true) as sent
-    FROM messages
-    WHERE (message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+        EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila'))::int as hour,
+        COUNT(*) FILTER (WHERE m.is_from_page = false) as received,
+        COUNT(*) FILTER (WHERE m.is_from_page = true) as sent
+    FROM messages m
+    JOIN pages p ON m.page_id = p.page_id
+    WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+      AND p.page_name IN %s
     GROUP BY hour
     ORDER BY hour
-""", (from_date, to_date))
+""", (from_date, to_date, page_filter_sql))
 hourly_data = cur.fetchall()
 
 if hourly_data:

@@ -340,6 +340,47 @@ def upsert_messages(conn, page_id, conversation_id, messages):
     return len(values)
 
 
+def calculate_response_times(conn, conversation_id):
+    """Calculate response_time_seconds for page replies in a conversation"""
+    cur = conn.cursor()
+
+    # Get all messages in the conversation ordered by time
+    cur.execute("""
+        SELECT id, message_time, is_from_page
+        FROM messages
+        WHERE conversation_id = %s
+        ORDER BY message_time ASC
+    """, (conversation_id,))
+    messages = cur.fetchall()
+
+    if len(messages) < 2:
+        cur.close()
+        return
+
+    last_user_msg_time = None
+    updates = []
+
+    for msg_id, msg_time, is_from_page in messages:
+        if not is_from_page:
+            # User message - record the time
+            last_user_msg_time = msg_time
+        elif is_from_page and last_user_msg_time is not None:
+            # Page reply - calculate response time
+            if msg_time and last_user_msg_time:
+                response_seconds = (msg_time - last_user_msg_time).total_seconds()
+                if response_seconds > 0:
+                    updates.append((response_seconds, msg_id))
+
+    # Update response times
+    for response_seconds, msg_id in updates:
+        cur.execute("""
+            UPDATE messages SET response_time_seconds = %s WHERE id = %s
+        """, (response_seconds, msg_id))
+
+    conn.commit()
+    cur.close()
+
+
 def sync_page(page_id, page_name, access_token, since_date, last_sync_time=None):
     """Sync data for a single page with skip unchanged optimization"""
     result = {
@@ -405,7 +446,12 @@ def sync_page(page_id, page_name, access_token, since_date, last_sync_time=None)
     # Only fetch messages for changed conversations
     for conv in changed_conversations:
         messages = fetch_messages(conv["id"], access_token, since_date)
-        result["messages"] += upsert_messages(conn, page_id, conv["id"], messages)
+        msg_count = upsert_messages(conn, page_id, conv["id"], messages)
+        result["messages"] += msg_count
+
+        # Calculate response times for this conversation
+        if msg_count > 0:
+            calculate_response_times(conn, conv["id"])
 
     conn.close()
 
@@ -548,5 +594,37 @@ def main():
     log("=" * 60)
 
 
+def recalculate_all_response_times():
+    """Recalculate response_time_seconds for all messages (one-time fix)"""
+    log("=" * 60)
+    log("Recalculating Response Times for All Messages")
+    log("=" * 60)
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Get all conversations
+    cur.execute("SELECT DISTINCT conversation_id FROM messages ORDER BY conversation_id")
+    conversations = [row[0] for row in cur.fetchall()]
+    cur.close()
+
+    log(f"Found {len(conversations)} conversations to process")
+
+    processed = 0
+    for conv_id in conversations:
+        calculate_response_times(conn, conv_id)
+        processed += 1
+        if processed % 1000 == 0:
+            log(f"  Processed {processed}/{len(conversations)} conversations...")
+
+    conn.close()
+    log(f"Done! Processed {processed} conversations")
+    log("=" * 60)
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--recalc-rt":
+        recalculate_all_response_times()
+    else:
+        main()
