@@ -601,7 +601,7 @@ with tab1:
         yaxis_title="Number of Agents",
         height=300
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
     st.subheader("Agents by Tier")
@@ -615,7 +615,7 @@ with tab2:
             with st.expander(f"{badge} {tier.title()} ({len(tier_df)} agents)", expanded=(tier in ['platinum', 'gold'])):
                 tier_display = tier_df[['rank', 'agent_name', 'score', 'qa_score', 'unique_users', 'attendance_rate']].copy()
                 tier_display.columns = ['Rank', 'Agent', 'Score', 'QA Score', 'Unique Users', 'Attendance %']
-                st.dataframe(tier_display, hide_index=True, width="stretch")
+                st.dataframe(tier_display, hide_index=True, use_container_width=True)
 
 with tab3:
     st.subheader("Response Time Analysis")
@@ -628,7 +628,7 @@ with tab3:
     rt_display = rt_df[['rank', 'agent_name', 'avg_rt_display', 'qa_score', 'qa_rating', 'unique_users']].copy()
     rt_display.columns = ['Rank', 'Agent', 'Avg Response Time', 'QA Score', 'QA Rating', 'Unique Users']
 
-    st.dataframe(rt_display.head(20), hide_index=True, width="stretch")
+    st.dataframe(rt_display.head(20), hide_index=True, use_container_width=True)
 
     # Response time chart
     st.subheader("Response Time by Agent")
@@ -654,7 +654,7 @@ with tab3:
         height=400
     )
     fig.update_coloraxes(colorbar_title="QA Score")
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 with tab4:
     st.subheader("Agent Details")
@@ -736,7 +736,7 @@ with tab4:
             score_display['Score'] = score_display['Score'].apply(lambda x: f"{x:.1f}")
             score_display['Weight'] = score_display['Weight'].apply(lambda x: f"{x}%")
             score_display['Weighted'] = score_display['Weighted'].apply(lambda x: f"{x:.1f}")
-            st.dataframe(score_display, hide_index=True, width="stretch")
+            st.dataframe(score_display, hide_index=True, use_container_width=True)
 
         with col2:
             fig = px.bar(
@@ -751,7 +751,7 @@ with tab4:
             )
             fig.update_layout(height=250, showlegend=False, margin=dict(l=0, r=0, t=40, b=0))
             fig.update_coloraxes(showscale=False)
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, use_container_width=True)
 
         # Weekly trend
         st.subheader("Weekly Performance Trend")
@@ -780,7 +780,7 @@ with tab4:
                     height=250,
                     margin=dict(l=0, r=0, t=40, b=0)
                 )
-                st.plotly_chart(fig, width="stretch")
+                st.plotly_chart(fig, use_container_width=True)
 
             with col2:
                 trend_data['avg_rt_min'] = trend_data['avg_rt'] / 60
@@ -793,6 +793,6 @@ with tab4:
                 )
                 fig.update_traces(line_color=COLORS['accent'])
                 fig.update_layout(height=250, margin=dict(l=0, r=0, t=40, b=0))
-                st.plotly_chart(fig, width="stretch")
+                st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No weekly trend data available for this period.")
