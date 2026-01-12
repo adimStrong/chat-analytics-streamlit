@@ -204,7 +204,12 @@ SPILL_KEYWORDS = [
     "play smart",
     "let us know if you need",
     "play only what you can afford",
-    "gaming should be fun"
+    "gaming should be fun",
+    "enjoy the game responsibly",
+    "additional assistance",
+    "need clarification",
+    "contact us back",
+    "only bet what you can afford"
 ]
 
 # ============================================
