@@ -105,6 +105,7 @@ def get_spill_conversations(agent_name, start_date, end_date, page_filter_sql, w
         FROM agent_convos ac
         LEFT JOIN convos_with_spill cws ON ac.conversation_id = cws.conversation_id
         WHERE {'cws.conversation_id IS NOT NULL' if with_spill else 'cws.conversation_id IS NULL'}
+          AND (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = ac.conversation_id) > 0
         ORDER BY ac.updated_time DESC
         LIMIT 100
     """
@@ -142,6 +143,7 @@ def get_spill_stats(agent_name, start_date, end_date, page_filter_sql):
             JOIN pages p ON c.page_id = p.page_id
             WHERE c.updated_time::date BETWEEN %s AND %s
               AND p.page_name IN %s
+              AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.conversation_id)
         ),
         resolved_convos AS (
             SELECT DISTINCT ac.conversation_id
@@ -190,6 +192,7 @@ def get_all_agents_spill_stats(start_date, end_date, page_filter_sql):
             WHERE a.is_active = true
               AND p.page_name IN %s
               AND c.updated_time::date BETWEEN %s AND %s
+              AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.conversation_id)
         ),
         resolved_convos AS (
             SELECT DISTINCT ac.agent_name, ac.conversation_id
