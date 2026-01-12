@@ -198,8 +198,9 @@ def build_spill_sql_conditions():
     conditions = []
     for keyword in SPILL_KEYWORDS:
         # Escape single quotes for SQL and lowercase
+        # Use %% to escape % for psycopg2 parameter substitution
         escaped = keyword.replace("'", "''").lower()
-        conditions.append(f"LOWER(m.message_text) LIKE '%{escaped}%'")
+        conditions.append(f"LOWER(m.message_text) LIKE '%%{escaped}%%'")
     return " OR ".join(conditions)
 
 @st.cache_data(ttl=CACHE_TTL["default"])
