@@ -457,41 +457,24 @@ else:
         else:
             st.warning(f"Found {len(convos_without)} conversations without closing message")
 
-            # Two column layout
-            col_list, col_thread = st.columns([1, 2])
+            for idx, row in convos_without.iterrows():
+                participant = row['participant_name'] or 'Unknown User'
+                updated = pd.to_datetime(row['updated_time']).strftime('%m-%d %H:%M') if row['updated_time'] else 'N/A'
 
-            with col_list:
-                st.markdown("### Conversations")
-                for idx, row in convos_without.iterrows():
-                    participant = row['participant_name'] or 'Unknown User'
-                    updated = pd.to_datetime(row['updated_time']).strftime('%m-%d %H:%M') if row['updated_time'] else 'N/A'
+                # Conversation header with toggle
+                col_info, col_toggle = st.columns([4, 1])
+                with col_info:
+                    st.markdown(f"**❌ {participant}** | {row['page_name']} | {updated} | {row['actual_msgs']} msgs")
+                with col_toggle:
+                    show_msgs = st.toggle("Show", key=f"toggle_no_{row['conversation_id']}")
 
-                    with st.expander(f"❌ {participant[:25]}"):
-                        st.caption(f"Page: {row['page_name']}")
-                        st.caption(f"Updated: {updated}")
-                        st.caption(f"Messages: {row['actual_msgs']}")
-                        if st.button("View", key=f"no_spill_{row['conversation_id']}"):
-                            st.session_state['spill_selected_conv'] = row['conversation_id']
-                            st.session_state['spill_selected_name'] = participant
-                            st.rerun()
-
-            with col_thread:
-                st.markdown("### Message Thread")
-                selected_conv = st.session_state.get('spill_selected_conv')
-                selected_name = st.session_state.get('spill_selected_name', 'Unknown')
-
-                if selected_conv:
-                    st.caption(f"Conversation with: **{selected_name}**")
-                    messages = get_conversation_messages(selected_conv)
-
-                    if messages.empty:
-                        st.info("No messages found")
-                    else:
-                        st.markdown("---")
-                        for idx, msg_row in messages.iterrows():
-                            display_message(msg_row, msg_row['is_from_page'])
-                else:
-                    st.info("Select a conversation to view messages")
+                if show_msgs:
+                    messages = get_conversation_messages(row['conversation_id'])
+                    if not messages.empty:
+                        with st.container():
+                            for _, msg_row in messages.iterrows():
+                                display_message(msg_row, msg_row['is_from_page'])
+                    st.markdown("---")
 
     with spill_tab2:
         st.subheader("Conversations With Closing Message")
@@ -504,41 +487,24 @@ else:
         else:
             st.success(f"Found {len(convos_with)} resolved conversations")
 
-            # Two column layout
-            col_list, col_thread = st.columns([1, 2])
+            for idx, row in convos_with.iterrows():
+                participant = row['participant_name'] or 'Unknown User'
+                updated = pd.to_datetime(row['updated_time']).strftime('%m-%d %H:%M') if row['updated_time'] else 'N/A'
 
-            with col_list:
-                st.markdown("### Conversations")
-                for idx, row in convos_with.iterrows():
-                    participant = row['participant_name'] or 'Unknown User'
-                    updated = pd.to_datetime(row['updated_time']).strftime('%m-%d %H:%M') if row['updated_time'] else 'N/A'
+                # Conversation header with toggle
+                col_info, col_toggle = st.columns([4, 1])
+                with col_info:
+                    st.markdown(f"**✅ {participant}** | {row['page_name']} | {updated} | {row['actual_msgs']} msgs")
+                with col_toggle:
+                    show_msgs = st.toggle("Show", key=f"toggle_yes_{row['conversation_id']}")
 
-                    with st.expander(f"✅ {participant[:25]}"):
-                        st.caption(f"Page: {row['page_name']}")
-                        st.caption(f"Updated: {updated}")
-                        st.caption(f"Messages: {row['actual_msgs']}")
-                        if st.button("View", key=f"with_spill_{row['conversation_id']}"):
-                            st.session_state['spill_selected_conv'] = row['conversation_id']
-                            st.session_state['spill_selected_name'] = participant
-                            st.rerun()
-
-            with col_thread:
-                st.markdown("### Message Thread")
-                selected_conv = st.session_state.get('spill_selected_conv')
-                selected_name = st.session_state.get('spill_selected_name', 'Unknown')
-
-                if selected_conv:
-                    st.caption(f"Conversation with: **{selected_name}**")
-                    messages = get_conversation_messages(selected_conv)
-
-                    if messages.empty:
-                        st.info("No messages found")
-                    else:
-                        st.markdown("---")
-                        for idx, msg_row in messages.iterrows():
-                            display_message(msg_row, msg_row['is_from_page'])
-                else:
-                    st.info("Select a conversation to view messages")
+                if show_msgs:
+                    messages = get_conversation_messages(row['conversation_id'])
+                    if not messages.empty:
+                        with st.container():
+                            for _, msg_row in messages.iterrows():
+                                display_message(msg_row, msg_row['is_from_page'])
+                    st.markdown("---")
 
 # Footer
 st.markdown("---")
