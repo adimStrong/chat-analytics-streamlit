@@ -367,7 +367,7 @@ cur.execute("""
         CASE WHEN s.schedule_status != 'present' THEN 0 ELSE COALESCE(uu.unique_users, 0) END as "Unique Users",
         CASE WHEN s.schedule_status != 'present' THEN 0 ELSE SUM(s.messages_received) END as "Msg Recv",
         CASE WHEN s.schedule_status != 'present' THEN 0 ELSE SUM(s.messages_sent) END as "Msg Sent",
-        CASE WHEN s.schedule_status != 'present' THEN 0 ELSE SUM(s.comment_replies) END as "Comments",
+        CASE WHEN s.schedule_status != 'present' THEN 0 ELSE SUM(s.comment_replies) END as "Comments Sent",
         CASE WHEN s.schedule_status != 'present' THEN 0
              WHEN SUM(s.messages_received) > 0 THEN ROUND(100.0 * SUM(s.messages_sent) / SUM(s.messages_received), 1)
              ELSE 0 END as "Response %%",
@@ -394,11 +394,11 @@ cur.execute("""
 sma_data = cur.fetchall()
 
 if sma_data:
-    sma_df = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %', 'Avg RT', 'Human RT', 'Days Present', 'Total Days'])
+    sma_df = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments Sent', 'Response %', 'Avg RT', 'Human RT', 'Days Present', 'Total Days'])
 
     # style_status is imported from utils module
     sma_display = sma_df.copy()
-    for col in ['New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments', 'Days Present', 'Total Days']:
+    for col in ['New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments Sent', 'Days Present', 'Total Days']:
         sma_display[col] = sma_display[col].apply(format_number)
     sma_display['Response %'] = sma_display['Response %'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
     sma_display['Avg RT'] = sma_df['Avg RT'].apply(format_rt)
@@ -430,7 +430,7 @@ if sma_data:
             st.markdown(f"👥 Unique Users: **{present_df['Unique Users'].sum():,}**")
             st.markdown(f"📥 Msg Recv: **{present_df['Msg Recv'].sum():,}**")
             st.markdown(f"📤 Msg Sent: **{present_df['Msg Sent'].sum():,}**")
-            st.markdown(f"💬 Comments: **{present_df['Comments'].sum():,}**")
+            st.markdown(f"💬 Comments Sent: **{present_df['Comments Sent'].sum():,}**")
             # Calculate average response times for present agents
             avg_rt_mean = present_df['Avg RT'].dropna().mean()
             human_rt_mean = present_df['Human RT'].dropna().mean()
@@ -717,7 +717,7 @@ csv_buffer.write("\n")
 
 if sma_data:
     csv_buffer.write("SMA MEMBER PERFORMANCE\n")
-    sma_export = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments', 'Response %', 'Avg RT (s)', 'Human RT (s)', 'Days Present', 'Total Days'])
+    sma_export = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments Sent', 'Response %', 'Avg RT (s)', 'Human RT (s)', 'Days Present', 'Total Days'])
     sma_export.to_csv(csv_buffer, index=False)
     csv_buffer.write("\n")
 
@@ -822,7 +822,7 @@ def generate_html_report():
         html += """
     <h2>👥 SMA Member Performance</h2>
     <table>
-        <tr><th>Agent</th><th>Shift</th><th>Status</th><th>Hours</th><th>New Chats</th><th>Unique Users</th><th>Msg Recv</th><th>Msg Sent</th><th>Comments</th><th>Response %</th><th>Avg RT</th><th>Human RT</th><th>Days</th></tr>
+        <tr><th>Agent</th><th>Shift</th><th>Status</th><th>Hours</th><th>New Chats</th><th>Unique Users</th><th>Msg Recv</th><th>Msg Sent</th><th>Comments Sent</th><th>Response %</th><th>Avg RT</th><th>Human RT</th><th>Days</th></tr>
 """
         for row in sma_data:
             status_style = 'background:#d1fae5' if row[2]=='present' else 'background:#fee2e2' if row[2]=='absent' else 'background:#f3f4f6'
