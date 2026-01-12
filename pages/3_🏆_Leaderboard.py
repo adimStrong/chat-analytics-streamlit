@@ -58,7 +58,9 @@ def build_spill_sql_conditions():
     """Build SQL LIKE conditions for spill detection"""
     conditions = []
     for keyword in SPILL_KEYWORDS:
-        conditions.append(f"LOWER(message_text) LIKE '%{keyword.lower()}%'")
+        # Escape single quotes for SQL
+        escaped = keyword.replace("'", "''").lower()
+        conditions.append(f"LOWER(message_text) LIKE '%{escaped}%'")
     return " OR ".join(conditions)
 
 # ============================================

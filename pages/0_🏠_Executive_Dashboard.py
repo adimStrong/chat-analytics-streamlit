@@ -197,8 +197,9 @@ def build_spill_sql_conditions():
     """Build SQL OR conditions for spill keyword detection"""
     conditions = []
     for keyword in SPILL_KEYWORDS:
-        escaped = keyword.replace("'", "''")
-        conditions.append(f"LOWER(m.message_text) LIKE '%{escaped.lower()}%'")
+        # Escape single quotes for SQL and lowercase
+        escaped = keyword.replace("'", "''").lower()
+        conditions.append(f"LOWER(m.message_text) LIKE '%{escaped}%'")
     return " OR ".join(conditions)
 
 @st.cache_data(ttl=CACHE_TTL["default"])
