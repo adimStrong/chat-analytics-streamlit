@@ -194,13 +194,13 @@ def calculate_productivity_score(unique_users, avg_unique_users):
     return min(100.0, score)
 
 def build_spill_sql_conditions():
-    """Build SQL OR conditions for spill keyword detection (uses m. alias)"""
+    """Build SQL OR conditions for spill keyword detection (no prefix for CTE context)"""
     conditions = []
     for keyword in SPILL_KEYWORDS:
         # Escape single quotes for SQL and lowercase
         # Use %% to escape % for psycopg2 parameter substitution
         escaped = keyword.replace("'", "''").lower()
-        conditions.append(f"LOWER(m.message_text) LIKE '%%{escaped}%%'")
+        conditions.append(f"LOWER(message_text) LIKE '%%{escaped}%%'")
     return " OR ".join(conditions)
 
 @st.cache_data(ttl=CACHE_TTL["default"])
@@ -246,22 +246,39 @@ def get_top_performers(start_date, end_date, page_filter_sql, limit=5):
         effective_start = max(start_date, spill_start)
         spill_conditions = build_spill_sql_conditions()
 
+        # Use CTE-based query structure (matches Leaderboard pattern)
         cur.execute(f"""
+            WITH agent_conversations AS (
+                SELECT
+                    a.agent_name,
+                    c.conversation_id
+                FROM agents a
+                JOIN agent_page_assignments apa ON a.id = apa.agent_id AND apa.is_active = true
+                JOIN pages p ON apa.page_id = p.page_id
+                JOIN conversations c ON c.page_id = apa.page_id
+                WHERE a.is_active = true
+                  AND p.page_name IN %s
+                  AND c.updated_time::date BETWEEN %s AND %s
+            ),
+            resolved_convos AS (
+                SELECT DISTINCT
+                    ac.agent_name,
+                    ac.conversation_id
+                FROM agent_conversations ac
+                JOIN messages m ON m.conversation_id = ac.conversation_id
+                WHERE m.is_from_page = true
+                  AND m.message_time::date BETWEEN %s AND %s
+                  AND ({spill_conditions})
+            )
             SELECT
-                a.agent_name,
-                COUNT(DISTINCT c.conversation_id) as total_convos,
-                COUNT(DISTINCT CASE WHEN ({spill_conditions}) THEN c.conversation_id END) as resolved_convos
-            FROM agents a
-            JOIN agent_page_assignments apa ON a.id = apa.agent_id
-            JOIN pages p ON apa.page_id = p.page_id
-            JOIN conversations c ON p.page_id = c.page_id
-            JOIN messages m ON c.conversation_id = m.conversation_id
-            WHERE c.last_message_time >= %s AND c.last_message_time < %s + INTERVAL '1 day'
-              AND p.page_name IN %s
-              AND m.is_from_page = true
-              AND a.is_active = true
-            GROUP BY a.agent_name
-        """, (effective_start, end_date, page_filter_sql))
+                ac.agent_name,
+                COUNT(DISTINCT ac.conversation_id) as total_convos,
+                COUNT(DISTINCT rc.conversation_id) as resolved_convos
+            FROM agent_conversations ac
+            LEFT JOIN resolved_convos rc ON ac.agent_name = rc.agent_name
+                                         AND ac.conversation_id = rc.conversation_id
+            GROUP BY ac.agent_name
+        """, (page_filter_sql, effective_start, end_date, effective_start, end_date))
 
         for row in cur.fetchall():
             agent_name, total_convos, resolved_convos = row
