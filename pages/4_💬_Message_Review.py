@@ -11,22 +11,11 @@ import pytz
 # Import shared modules
 from config import (
     CORE_PAGES, CORE_PAGES_SQL, TIMEZONE, CACHE_TTL, COLORS,
-    LIVESTREAM_PAGES_SQL, SOCMED_PAGES_SQL,
-    SPILL_KEYWORDS, SPILL_START_DATE
+    LIVESTREAM_PAGES_SQL, SOCMED_PAGES_SQL
 )
 from db_utils import get_simple_connection as get_connection
 from utils import format_rt
 
-
-def build_spill_sql_conditions():
-    """Build SQL OR conditions for spill keyword detection"""
-    conditions = []
-    for keyword in SPILL_KEYWORDS:
-        # Escape single quotes for SQL
-        # Use %% to escape % for psycopg2 parameter substitution
-        escaped = keyword.replace("'", "''").lower()
-        conditions.append(f"LOWER(message_text) LIKE '%%{escaped}%%'")
-    return " OR ".join(conditions)
 
 # Page config
 st.set_page_config(
@@ -156,113 +145,6 @@ def get_agent_message_stats(agent_name, start_date, end_date):
         'total_sent': row[1] or 0,
         'avg_rt': row[2],
         'days_present': row[3] or 0
-    }
-
-
-@st.cache_data(ttl=CACHE_TTL["default"])
-def get_spill_conversations(agent_name, start_date, end_date, page_filter_sql, with_spill=True):
-    """Get conversations with or without spill keywords"""
-    conn = get_connection()
-    cur = conn.cursor()
-
-    spill_conditions = build_spill_sql_conditions()
-
-    # Query to find conversations with/without spill messages
-    query = f"""
-        WITH agent_pages AS (
-            SELECT DISTINCT apa.page_id
-            FROM agents a
-            JOIN agent_page_assignments apa ON a.id = apa.agent_id
-            WHERE a.agent_name = %s AND apa.is_active = true
-        ),
-        convos_with_spill AS (
-            SELECT DISTINCT c.conversation_id
-            FROM conversations c
-            JOIN agent_pages ap ON c.page_id = ap.page_id
-            JOIN pages p ON c.page_id = p.page_id
-            JOIN messages m ON c.conversation_id = m.conversation_id
-            WHERE c.updated_time::date BETWEEN %s AND %s
-              AND p.page_name IN %s
-              AND m.is_from_page = true
-              AND ({spill_conditions})
-        )
-        SELECT
-            c.conversation_id,
-            c.participant_name,
-            p.page_name,
-            c.updated_time,
-            c.message_count,
-            (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.conversation_id) as actual_msgs,
-            CASE WHEN cws.conversation_id IS NOT NULL THEN true ELSE false END as has_spill
-        FROM conversations c
-        JOIN pages p ON c.page_id = p.page_id
-        JOIN agent_pages ap ON c.page_id = ap.page_id
-        LEFT JOIN convos_with_spill cws ON c.conversation_id = cws.conversation_id
-        WHERE c.updated_time::date BETWEEN %s AND %s
-          AND p.page_name IN %s
-          AND {'cws.conversation_id IS NOT NULL' if with_spill else 'cws.conversation_id IS NULL'}
-        ORDER BY c.updated_time DESC
-        LIMIT 50
-    """
-
-    cur.execute(query, (agent_name, start_date, end_date, page_filter_sql, start_date, end_date, page_filter_sql))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    return pd.DataFrame(rows, columns=[
-        'conversation_id', 'participant_name', 'page_name',
-        'updated_time', 'message_count', 'actual_msgs', 'has_spill'
-    ])
-
-
-@st.cache_data(ttl=CACHE_TTL["default"])
-def get_spill_stats(agent_name, start_date, end_date, page_filter_sql):
-    """Get spill statistics for an agent"""
-    conn = get_connection()
-    cur = conn.cursor()
-
-    spill_conditions = build_spill_sql_conditions()
-
-    query = f"""
-        WITH agent_pages AS (
-            SELECT DISTINCT apa.page_id
-            FROM agents a
-            JOIN agent_page_assignments apa ON a.id = apa.agent_id
-            WHERE a.agent_name = %s AND apa.is_active = true
-        ),
-        agent_convos AS (
-            SELECT DISTINCT c.conversation_id
-            FROM conversations c
-            JOIN agent_pages ap ON c.page_id = ap.page_id
-            JOIN pages p ON c.page_id = p.page_id
-            WHERE c.updated_time::date BETWEEN %s AND %s
-              AND p.page_name IN %s
-        ),
-        resolved_convos AS (
-            SELECT DISTINCT ac.conversation_id
-            FROM agent_convos ac
-            JOIN messages m ON ac.conversation_id = m.conversation_id
-            WHERE m.is_from_page = true
-              AND ({spill_conditions})
-        )
-        SELECT
-            (SELECT COUNT(*) FROM agent_convos) as total_convos,
-            (SELECT COUNT(*) FROM resolved_convos) as resolved_convos
-    """
-
-    cur.execute(query, (agent_name, start_date, end_date, page_filter_sql))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-
-    total = row[0] or 0
-    resolved = row[1] or 0
-    return {
-        'total': total,
-        'resolved': resolved,
-        'unresolved': total - resolved,
-        'rate': (resolved / total * 100) if total > 0 else 0
     }
 
 
@@ -426,87 +308,6 @@ if selected_agent:
             else:
                 st.info("Select a conversation from the left to view messages")
 
-# ============================================
-# SPILL REVIEW SECTION
-# ============================================
-st.markdown("---")
-st.header("🎯 Spill Review")
-st.caption("Review conversations with and without closing messages (spill keywords)")
-
-if selected_agent:
-    # Check if we're in spill tracking period
-    spill_start = datetime.strptime(SPILL_START_DATE, "%Y-%m-%d").date()
-
-    if end_date < spill_start:
-        st.warning(f"Spill tracking starts from {SPILL_START_DATE}. Select a date range that includes this date or later.")
-    else:
-        # Get spill stats
-        spill_stats = get_spill_stats(selected_agent, start_date, end_date, page_filter_sql)
-
-        # Display stats
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Total Conversations", f"{spill_stats['total']:,}")
-        with col2:
-            st.metric("✅ With Spill", f"{spill_stats['resolved']:,}", help="Conversations with closing message keywords")
-        with col3:
-            st.metric("❌ Without Spill", f"{spill_stats['unresolved']:,}", help="Conversations missing closing message")
-        with col4:
-            st.metric("Resolution Rate", f"{spill_stats['rate']:.1f}%")
-
-        # Tabs for with/without spill
-        spill_tab1, spill_tab2 = st.tabs(["✅ With Spill (Resolved)", "❌ Without Spill (Needs Review)"])
-
-        with spill_tab1:
-            st.subheader("Conversations with Closing Message")
-            st.caption("These conversations have proper closing messages with spill keywords")
-
-            convos_with = get_spill_conversations(selected_agent, start_date, end_date, page_filter_sql, with_spill=True)
-
-            if convos_with.empty:
-                st.info("No conversations with spill keywords found in this period")
-            else:
-                st.success(f"Found {len(convos_with)} resolved conversations (showing latest 50)")
-
-                for idx, row in convos_with.iterrows():
-                    participant = row['participant_name'] or 'Unknown User'
-                    updated = pd.to_datetime(row['updated_time']).strftime('%Y-%m-%d %H:%M') if row['updated_time'] else 'N/A'
-
-                    with st.expander(f"✅ **{participant[:30]}** - {row['page_name']} ({updated})"):
-                        st.caption(f"Messages: {row['actual_msgs']}")
-                        if st.button("View Thread", key=f"spill_view_{row['conversation_id']}"):
-                            st.session_state['selected_conversation'] = row['conversation_id']
-                            st.session_state['selected_participant'] = participant
-                            st.rerun()
-
-        with spill_tab2:
-            st.subheader("Conversations Without Closing Message")
-            st.caption("These conversations may need follow-up - no spill keywords detected")
-
-            convos_without = get_spill_conversations(selected_agent, start_date, end_date, page_filter_sql, with_spill=False)
-
-            if convos_without.empty:
-                st.success("All conversations have proper closing messages!")
-            else:
-                st.warning(f"Found {len(convos_without)} conversations without closing message (showing latest 50)")
-
-                for idx, row in convos_without.iterrows():
-                    participant = row['participant_name'] or 'Unknown User'
-                    updated = pd.to_datetime(row['updated_time']).strftime('%Y-%m-%d %H:%M') if row['updated_time'] else 'N/A'
-
-                    with st.expander(f"❌ **{participant[:30]}** - {row['page_name']} ({updated})"):
-                        st.caption(f"Messages: {row['actual_msgs']}")
-                        if st.button("Review Thread", key=f"no_spill_view_{row['conversation_id']}"):
-                            st.session_state['selected_conversation'] = row['conversation_id']
-                            st.session_state['selected_participant'] = participant
-                            st.rerun()
-
-        # Show spill keywords reference
-        with st.expander("📋 Spill Keywords Reference"):
-            st.caption("Conversations are marked as 'resolved' if they contain any of these keywords in page replies:")
-            cols = st.columns(3)
-            for i, keyword in enumerate(SPILL_KEYWORDS):
-                cols[i % 3].markdown(f"- {keyword}")
 
 # Footer
 st.markdown("---")
