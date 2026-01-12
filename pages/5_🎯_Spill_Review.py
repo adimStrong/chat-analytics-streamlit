@@ -339,18 +339,20 @@ st.markdown("---")
 # Check spill tracking period
 spill_start = datetime.strptime(SPILL_START_DATE, "%Y-%m-%d").date()
 today = date.today()
+yesterday = today - timedelta(days=1)  # T+1: Only show up to yesterday
 
 # Sidebar - Filters
 with st.sidebar:
     st.header("Filter Settings")
+    st.caption("T+1 Report: Shows data up to yesterday")
 
     # Date range
     st.subheader("Date Range")
     col1, col2 = st.columns(2)
     with col1:
-        start_date = st.date_input("From", max(spill_start, today - timedelta(days=7)))
+        start_date = st.date_input("From", max(spill_start, yesterday - timedelta(days=6)), max_value=yesterday)
     with col2:
-        end_date = st.date_input("To", today)
+        end_date = st.date_input("To", yesterday, max_value=yesterday)
 
     if start_date < spill_start:
         st.warning(f"Spill tracking starts {SPILL_START_DATE}")
