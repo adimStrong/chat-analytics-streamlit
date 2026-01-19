@@ -24,11 +24,16 @@ st.set_page_config(
 )
 
 
-def get_meta_inbox_url(page_id: str, conversation_id: str) -> str:
-    """Generate Meta Business Suite inbox URL for a conversation."""
-    # Use Meta Business Suite unified inbox with selected_item_id
-    # conversation_id should include the t_ prefix (e.g., t_122101167111209344)
-    return f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}&selected_item_id={conversation_id}"
+def get_meta_inbox_url(page_id: str, participant_id: str = None) -> str:
+    """Generate Meta Business Suite inbox URL for a conversation.
+
+    Uses participant_id (PSID) for selected_item_id parameter.
+    Note: Deep linking may not always work - Meta uses internal IDs.
+    """
+    if participant_id:
+        return f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}&selected_item_id={participant_id}"
+    # Fallback: just open the inbox for the page
+    return f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}"
 
 
 def get_db_connection():
@@ -251,7 +256,7 @@ def get_full_conversation_history(conv_ids: list, start_date, end_date=None):
 def get_all_conversations(start_date, end_date=None):
     """
     Get ALL conversations (with or without spiels) for the date range.
-    Returns conversation IDs with basic info including page_id for Meta links.
+    Returns conversation IDs with basic info including page_id and participant_id for Meta links.
     """
     if end_date is None:
         end_date = start_date
@@ -262,12 +267,14 @@ def get_all_conversations(start_date, end_date=None):
     cur.execute("""
         SELECT DISTINCT m.conversation_id, p.page_name, p.page_id,
                MIN(m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila') as first_msg,
-               COUNT(*) as msg_count
+               COUNT(*) as msg_count,
+               c.participant_id, c.participant_name
         FROM messages m
         JOIN pages p ON m.page_id = p.page_id
+        LEFT JOIN conversations c ON m.conversation_id = c.conversation_id
         WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
           AND p.page_name IN %s
-        GROUP BY m.conversation_id, p.page_name, p.page_id
+        GROUP BY m.conversation_id, p.page_name, p.page_id, c.participant_id, c.participant_name
         ORDER BY first_msg DESC
         LIMIT 500
     """, (start_date, end_date, tuple(CORE_PAGES)))
@@ -281,7 +288,9 @@ def get_all_conversations(start_date, end_date=None):
             'page': row[1],
             'page_id': row[2],
             'first_msg': row[3],
-            'msg_count': row[4]
+            'msg_count': row[4],
+            'participant_id': row[5],
+            'participant_name': row[6]
         }
         for row in convs
     }
@@ -734,11 +743,19 @@ def main():
                         status = " + ".join(status_icons) if status_icons else "No Spiels"
 
                         with st.expander(f"📬 {conv_data['page']} - {status} ({len(conv_data['messages'])} msgs) | ID: {conv_id[:12]}...", expanded=False):
-                            # Meta Business Suite link - get page_id from all_convs or conv_data
-                            page_id = all_convs.get(conv_id, {}).get('page_id') or conv_data.get('page_id', '')
+                            # Meta Business Suite link - get page_id and participant_id from all_convs
+                            conv_info = all_convs.get(conv_id, {})
+                            page_id = conv_info.get('page_id') or conv_data.get('page_id', '')
+                            participant_id = conv_info.get('participant_id')
+                            participant_name = conv_info.get('participant_name', '')
                             if page_id:
-                                meta_url = get_meta_inbox_url(str(page_id), conv_id)
-                                st.markdown(f"🔗 [Open in Meta Business Suite]({meta_url})")
+                                meta_url = get_meta_inbox_url(str(page_id), str(participant_id) if participant_id else None)
+                                link_col, copy_col = st.columns([3, 2])
+                                with link_col:
+                                    st.markdown(f"🔗 [Open in Meta Business Suite]({meta_url})")
+                                with copy_col:
+                                    if participant_name:
+                                        st.code(participant_name, language=None)
                             st.code(conv_id, language=None)
                             if spiel_info:
                                 if has_opening:
@@ -768,7 +785,7 @@ def main():
                                     f"msg_{conv_id}_{i}",
                                     value=msg['text'],
                                     height=80,
-                                    key=f"full_{conv_id}_{i}_{page_num}",
+                                    key=f"full_{chat_filter[:4]}_{conv_id}_{i}_{page_num}",
                                     disabled=True,
                                     label_visibility="collapsed"
                                 )
@@ -789,15 +806,23 @@ def main():
 
                     st.caption(f"Showing first {len(conv_ids)} conversations without spiels")
                     for conv_id, conv_data in list(full_history.items())[:20]:
-                        # Get page_id from all_convs (more reliable) or fallback to conv_data
-                        page_id = all_convs.get(conv_id, {}).get('page_id') or conv_data.get('page_id', '')
-                        page_name = conv_data.get('page', all_convs.get(conv_id, {}).get('page', 'Unknown'))
+                        # Get page_id, participant_id from all_convs (more reliable) or fallback to conv_data
+                        conv_info = all_convs.get(conv_id, {})
+                        page_id = conv_info.get('page_id') or conv_data.get('page_id', '')
+                        participant_id = conv_info.get('participant_id')
+                        participant_name = conv_info.get('participant_name', '')
+                        page_name = conv_data.get('page', conv_info.get('page', 'Unknown'))
 
                         with st.expander(f"📭 {page_name} ({len(conv_data['messages'])} msgs) | ID: {conv_id[:12]}...", expanded=False):
                             # Meta Business Suite link
                             if page_id:
-                                meta_url = get_meta_inbox_url(str(page_id), conv_id)
-                                st.markdown(f"🔗 [Open in Meta Business Suite]({meta_url})")
+                                meta_url = get_meta_inbox_url(str(page_id), str(participant_id) if participant_id else None)
+                                link_col, copy_col = st.columns([3, 2])
+                                with link_col:
+                                    st.markdown(f"🔗 [Open in Meta Business Suite]({meta_url})")
+                                with copy_col:
+                                    if participant_name:
+                                        st.code(participant_name, language=None)
                             else:
                                 st.warning("Page ID not found - cannot generate Meta link")
                             st.code(conv_id, language=None)
