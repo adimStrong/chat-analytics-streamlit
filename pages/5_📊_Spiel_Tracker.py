@@ -732,10 +732,10 @@ def main():
                         status = " + ".join(status_icons) if status_icons else "No Spiels"
 
                         with st.expander(f"📬 {conv_data['page']} - {status} ({len(conv_data['messages'])} msgs) | ID: {conv_id[:12]}...", expanded=False):
-                            # Meta Business Suite link
-                            page_id = conv_data.get('page_id', '')
+                            # Meta Business Suite link - get page_id from all_convs or conv_data
+                            page_id = all_convs.get(conv_id, {}).get('page_id') or conv_data.get('page_id', '')
                             if page_id:
-                                meta_url = get_meta_inbox_url(page_id, conv_id)
+                                meta_url = get_meta_inbox_url(str(page_id), conv_id)
                                 st.markdown(f"🔗 [Open in Meta Business Suite]({meta_url})")
                             st.code(conv_id, language=None)
                             if spiel_info:
@@ -787,12 +787,17 @@ def main():
 
                     st.caption(f"Showing first {len(conv_ids)} conversations without spiels")
                     for conv_id, conv_data in list(full_history.items())[:20]:
-                        with st.expander(f"📭 {conv_data['page']} ({len(conv_data['messages'])} msgs) | ID: {conv_id[:12]}...", expanded=False):
+                        # Get page_id from all_convs (more reliable) or fallback to conv_data
+                        page_id = all_convs.get(conv_id, {}).get('page_id') or conv_data.get('page_id', '')
+                        page_name = conv_data.get('page', all_convs.get(conv_id, {}).get('page', 'Unknown'))
+
+                        with st.expander(f"📭 {page_name} ({len(conv_data['messages'])} msgs) | ID: {conv_id[:12]}...", expanded=False):
                             # Meta Business Suite link
-                            page_id = conv_data.get('page_id', '')
                             if page_id:
-                                meta_url = get_meta_inbox_url(page_id, conv_id)
+                                meta_url = get_meta_inbox_url(str(page_id), conv_id)
                                 st.markdown(f"🔗 [Open in Meta Business Suite]({meta_url})")
+                            else:
+                                st.warning("Page ID not found - cannot generate Meta link")
                             st.code(conv_id, language=None)
                             st.caption("No spiels detected in this conversation")
                 review_data = []  # No spiel messages to show
