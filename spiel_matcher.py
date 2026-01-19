@@ -338,15 +338,37 @@ def count_spiels(agent_name: str, messages: list, page_name: str = None) -> tupl
     return opening_count, closing_count
 
 
-def get_all_key_phrases() -> list:
-    """Get all key phrases for SQL pre-filtering."""
+def get_all_key_phrases(spiel_type: str = None) -> list:
+    """Get all key phrases for SQL pre-filtering.
+
+    Args:
+        spiel_type: Optional - "opening" or "closing" to filter by type.
+                   If None, returns all phrases.
+    """
     phrases = set()
     for agent_config in AGENT_SPIELS.values():
         for category_config in agent_config.values():
-            for spiel_type in ["opening", "closing"]:
-                if spiel_type in category_config:
-                    phrases.update(category_config[spiel_type][1])
+            types_to_check = [spiel_type] if spiel_type else ["opening", "closing"]
+            for st in types_to_check:
+                if st in category_config:
+                    phrases.update(category_config[st][1])
     return list(phrases)
+
+
+def get_key_phrases(agent_name: str, spiel_type: str, page_name: str = None) -> list:
+    """Get key phrases for a specific agent and spiel type for SQL pre-filtering."""
+    normalized_name = normalize_agent_name(agent_name)
+    category = get_page_category(page_name) if page_name else "MAIN"
+
+    config = AGENT_SPIELS.get(normalized_name, {}).get(category, {})
+    if not config:
+        return []
+
+    spiel_config = config.get(spiel_type)
+    if not spiel_config:
+        return []
+
+    return spiel_config[1]  # Return key phrases list
 
 
 def get_supported_agents() -> list:
