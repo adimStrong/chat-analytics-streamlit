@@ -281,124 +281,231 @@ st.subheader("👥 SMA Member Performance")
 # Calculate total days in date range
 total_days_in_range = (to_date - from_date).days + 1
 
-cur.execute("""
-    WITH agent_pages AS (
-        SELECT DISTINCT a.id as agent_id, a.agent_name, apa.page_id, apa.shift
-        FROM agents a
-        JOIN agent_page_assignments apa ON a.id = apa.agent_id
-        WHERE a.is_active = true AND apa.is_active = true
-    ),
-    -- First message ever per sender (to identify new users)
-    first_messages AS (
-        SELECT sender_id, MIN(message_time) as first_msg_time
-        FROM messages
-        WHERE is_from_page = false
-        GROUP BY sender_id
-    ),
-    -- New chats = first-time users (their first message ever is within the date range)
-    new_chats AS (
+# Use aggregated query for date ranges (more than 1 day)
+if total_days_in_range > 1:
+    # AGGREGATED query for date ranges - combines all days into single row per agent
+    cur.execute("""
+        WITH agent_pages AS (
+            SELECT DISTINCT a.id as agent_id, a.agent_name, apa.page_id, apa.shift
+            FROM agents a
+            JOIN agent_page_assignments apa ON a.id = apa.agent_id
+            WHERE a.is_active = true AND apa.is_active = true
+        ),
+        first_messages AS (
+            SELECT sender_id, MIN(message_time) as first_msg_time
+            FROM messages
+            WHERE is_from_page = false
+            GROUP BY sender_id
+        ),
+        new_chats AS (
+            SELECT
+                ap.agent_name,
+                ap.shift,
+                COUNT(DISTINCT m.sender_id) as new_chats
+            FROM agent_pages ap
+            JOIN messages m ON ap.page_id = m.page_id
+            JOIN first_messages fm ON m.sender_id = fm.sender_id
+            WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+              AND m.is_from_page = false
+              AND (fm.first_msg_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+              AND CASE ap.shift
+                  WHEN 'Morning' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
+                  WHEN 'Mid' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
+                  ELSE EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
+              END
+            GROUP BY ap.agent_name, ap.shift
+        ),
+        unique_users AS (
+            SELECT
+                ap.agent_name,
+                ap.shift,
+                COUNT(DISTINCT m.sender_id) as unique_users
+            FROM agent_pages ap
+            JOIN messages m ON ap.page_id = m.page_id
+            WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+              AND m.is_from_page = false
+              AND CASE ap.shift
+                  WHEN 'Morning' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
+                  WHEN 'Mid' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
+                  ELSE EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
+              END
+            GROUP BY ap.agent_name, ap.shift
+        ),
+        human_rt AS (
+            SELECT
+                ap.agent_name,
+                ap.shift,
+                AVG(ss.avg_response_time_seconds) as human_response_time
+            FROM agent_pages ap
+            JOIN sessions ss ON ap.page_id = ss.page_id
+            WHERE (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+              AND ss.avg_response_time_seconds > 0
+              AND CASE ap.shift
+                  WHEN 'Morning' THEN EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
+                  WHEN 'Mid' THEN EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
+                  ELSE EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
+              END
+            GROUP BY ap.agent_name, ap.shift
+        ),
+        agent_stats_agg AS (
+            SELECT
+                a.agent_name,
+                s.shift,
+                SUM(s.messages_received) FILTER (WHERE s.schedule_status = 'present') as messages_received,
+                SUM(s.messages_sent) FILTER (WHERE s.schedule_status = 'present') as messages_sent,
+                SUM(s.comment_replies) FILTER (WHERE s.schedule_status = 'present') as comment_replies,
+                AVG(s.avg_response_time_seconds) FILTER (WHERE s.schedule_status = 'present' AND s.avg_response_time_seconds > 0) as avg_rt,
+                SUM(CASE WHEN s.duty_hours ~ '^[0-9.]+$' THEN CAST(s.duty_hours AS NUMERIC) ELSE 0 END) FILTER (WHERE s.schedule_status = 'present') as total_hours,
+                COUNT(*) FILTER (WHERE s.schedule_status = 'present') as days_present,
+                COUNT(*) as total_days,
+                COALESCE(SUM(s.opening_spiels_count) FILTER (WHERE s.schedule_status = 'present'), 0) as opening_spiels,
+                COALESCE(SUM(s.closing_spiels_count) FILTER (WHERE s.schedule_status = 'present'), 0) as closing_spiels
+            FROM agent_daily_stats s
+            JOIN agents a ON s.agent_id = a.id
+            WHERE s.date BETWEEN %s AND %s
+            GROUP BY a.agent_name, s.shift
+        )
         SELECT
-            ap.agent_name,
-            ap.shift,
-            COUNT(DISTINCT m.sender_id) as new_chats
-        FROM agent_pages ap
-        JOIN messages m ON ap.page_id = m.page_id
-        JOIN first_messages fm ON m.sender_id = fm.sender_id
-        WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
-          AND m.is_from_page = false
-          AND (fm.first_msg_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
-          AND CASE ap.shift
-              WHEN 'Morning' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
-              WHEN 'Mid' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
-              ELSE EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
-          END
-        GROUP BY ap.agent_name, ap.shift
-    ),
-    -- Unique users = all distinct users who messaged (including returning)
-    unique_users AS (
+            asa.agent_name as "Agent",
+            asa.shift as "Shift",
+            CASE WHEN asa.days_present > 0 THEN 'present' ELSE 'absent' END as "Status",
+            asa.total_hours as "Hours",
+            COALESCE(nc.new_chats, 0) as "New Chats",
+            COALESCE(uu.unique_users, 0) as "Unique Users",
+            COALESCE(asa.messages_received, 0) as "Msg Recv",
+            COALESCE(asa.messages_sent, 0) as "Msg Sent",
+            COALESCE(asa.comment_replies, 0) as "Comments Sent",
+            asa.opening_spiels as "Opening",
+            asa.closing_spiels as "Closing",
+            CASE WHEN COALESCE(asa.messages_received, 0) > 0
+                 THEN ROUND(100.0 * COALESCE(asa.messages_sent, 0) / asa.messages_received, 1)
+                 ELSE 0 END as "Response %%",
+            ROUND(asa.avg_rt::numeric, 1) as "Avg RT",
+            ROUND(hrt.human_response_time::numeric, 1) as "Human RT",
+            asa.days_present as "Days Present",
+            asa.total_days as "Total Days"
+        FROM agent_stats_agg asa
+        LEFT JOIN new_chats nc ON asa.agent_name = nc.agent_name AND asa.shift = nc.shift
+        LEFT JOIN unique_users uu ON asa.agent_name = uu.agent_name AND asa.shift = uu.shift
+        LEFT JOIN human_rt hrt ON asa.agent_name = hrt.agent_name AND asa.shift = hrt.shift
+        ORDER BY
+            CASE asa.shift
+                WHEN 'Morning' THEN 1
+                WHEN 'Mid' THEN 2
+                ELSE 3
+            END,
+            asa.agent_name
+    """, (from_date, to_date, from_date, to_date, from_date, to_date, from_date, to_date, from_date, to_date))
+else:
+    # SINGLE DAY query - shows individual status per agent
+    cur.execute("""
+        WITH agent_pages AS (
+            SELECT DISTINCT a.id as agent_id, a.agent_name, apa.page_id, apa.shift
+            FROM agents a
+            JOIN agent_page_assignments apa ON a.id = apa.agent_id
+            WHERE a.is_active = true AND apa.is_active = true
+        ),
+        first_messages AS (
+            SELECT sender_id, MIN(message_time) as first_msg_time
+            FROM messages
+            WHERE is_from_page = false
+            GROUP BY sender_id
+        ),
+        new_chats AS (
+            SELECT
+                ap.agent_name,
+                ap.shift,
+                COUNT(DISTINCT m.sender_id) as new_chats
+            FROM agent_pages ap
+            JOIN messages m ON ap.page_id = m.page_id
+            JOIN first_messages fm ON m.sender_id = fm.sender_id
+            WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+              AND m.is_from_page = false
+              AND (fm.first_msg_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+              AND CASE ap.shift
+                  WHEN 'Morning' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
+                  WHEN 'Mid' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
+                  ELSE EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
+              END
+            GROUP BY ap.agent_name, ap.shift
+        ),
+        unique_users AS (
+            SELECT
+                ap.agent_name,
+                ap.shift,
+                COUNT(DISTINCT m.sender_id) as unique_users
+            FROM agent_pages ap
+            JOIN messages m ON ap.page_id = m.page_id
+            WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+              AND m.is_from_page = false
+              AND CASE ap.shift
+                  WHEN 'Morning' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
+                  WHEN 'Mid' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
+                  ELSE EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
+              END
+            GROUP BY ap.agent_name, ap.shift
+        ),
+        human_rt AS (
+            SELECT
+                ap.agent_name,
+                ap.shift,
+                AVG(ss.avg_response_time_seconds) as human_response_time
+            FROM agent_pages ap
+            JOIN sessions ss ON ap.page_id = ss.page_id
+            WHERE (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
+              AND ss.avg_response_time_seconds > 0
+              AND CASE ap.shift
+                  WHEN 'Morning' THEN EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
+                  WHEN 'Mid' THEN EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
+                  ELSE EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
+              END
+            GROUP BY ap.agent_name, ap.shift
+        )
         SELECT
-            ap.agent_name,
-            ap.shift,
-            COUNT(DISTINCT m.sender_id) as unique_users
-        FROM agent_pages ap
-        JOIN messages m ON ap.page_id = m.page_id
-        WHERE (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
-          AND m.is_from_page = false
-          AND CASE ap.shift
-              WHEN 'Morning' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
-              WHEN 'Mid' THEN EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
-              ELSE EXTRACT(HOUR FROM (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
-          END
-        GROUP BY ap.agent_name, ap.shift
-    ),
-    human_rt AS (
-        SELECT
-            ap.agent_name,
-            ap.shift,
-            AVG(ss.avg_response_time_seconds) as human_response_time
-        FROM agent_pages ap
-        JOIN sessions ss ON ap.page_id = ss.page_id
-        WHERE (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date BETWEEN %s AND %s
-          AND ss.avg_response_time_seconds > 0
-          AND CASE ap.shift
-              WHEN 'Morning' THEN EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 6 AND 13
-              WHEN 'Mid' THEN EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) BETWEEN 14 AND 21
-              ELSE EXTRACT(HOUR FROM (ss.session_start AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')) NOT BETWEEN 6 AND 21
-          END
-        GROUP BY ap.agent_name, ap.shift
-    ),
-    attendance AS (
-        SELECT
-            a.agent_name,
-            s.shift,
-            COUNT(*) FILTER (WHERE s.schedule_status = 'present') as days_present,
-            COUNT(*) as total_scheduled_days
+            a.agent_name as "Agent",
+            s.shift as "Shift",
+            s.schedule_status as "Status",
+            s.duty_hours as "Hours",
+            CASE WHEN s.schedule_status != 'present' THEN 0 ELSE COALESCE(nc.new_chats, 0) END as "New Chats",
+            CASE WHEN s.schedule_status != 'present' THEN 0 ELSE COALESCE(uu.unique_users, 0) END as "Unique Users",
+            CASE WHEN s.schedule_status != 'present' THEN 0 ELSE s.messages_received END as "Msg Recv",
+            CASE WHEN s.schedule_status != 'present' THEN 0 ELSE s.messages_sent END as "Msg Sent",
+            CASE WHEN s.schedule_status != 'present' THEN 0 ELSE s.comment_replies END as "Comments Sent",
+            CASE WHEN s.schedule_status != 'present' THEN 0 ELSE COALESCE(s.opening_spiels_count, 0) END as "Opening",
+            CASE WHEN s.schedule_status != 'present' THEN 0 ELSE COALESCE(s.closing_spiels_count, 0) END as "Closing",
+            CASE WHEN s.schedule_status != 'present' THEN 0
+                 WHEN s.messages_received > 0 THEN ROUND(100.0 * s.messages_sent / s.messages_received, 1)
+                 ELSE 0 END as "Response %%",
+            CASE WHEN s.schedule_status != 'present' THEN NULL ELSE ROUND(s.avg_response_time_seconds::numeric, 1) END as "Avg RT",
+            CASE WHEN s.schedule_status != 'present' THEN NULL ELSE ROUND(hrt.human_response_time::numeric, 1) END as "Human RT",
+            CASE WHEN s.schedule_status = 'present' THEN 1 ELSE 0 END as "Days Present",
+            1 as "Total Days"
         FROM agent_daily_stats s
         JOIN agents a ON s.agent_id = a.id
-        WHERE s.date BETWEEN %s AND %s
-        GROUP BY a.agent_name, s.shift
-    )
-    SELECT
-        a.agent_name as "Agent",
-        s.shift as "Shift",
-        s.schedule_status as "Status",
-        s.duty_hours as "Hours",
-        CASE WHEN s.schedule_status != 'present' THEN 0 ELSE COALESCE(nc.new_chats, 0) END as "New Chats",
-        CASE WHEN s.schedule_status != 'present' THEN 0 ELSE COALESCE(uu.unique_users, 0) END as "Unique Users",
-        CASE WHEN s.schedule_status != 'present' THEN 0 ELSE SUM(s.messages_received) END as "Msg Recv",
-        CASE WHEN s.schedule_status != 'present' THEN 0 ELSE SUM(s.messages_sent) END as "Msg Sent",
-        CASE WHEN s.schedule_status != 'present' THEN 0 ELSE SUM(s.comment_replies) END as "Comments Sent",
-        CASE WHEN s.schedule_status != 'present' THEN 0
-             WHEN SUM(s.messages_received) > 0 THEN ROUND(100.0 * SUM(s.messages_sent) / SUM(s.messages_received), 1)
-             ELSE 0 END as "Response %%",
-        CASE WHEN s.schedule_status != 'present' THEN NULL ELSE ROUND(AVG(s.avg_response_time_seconds)::numeric, 1) END as "Avg RT",
-        CASE WHEN s.schedule_status != 'present' THEN NULL ELSE ROUND(AVG(hrt.human_response_time)::numeric, 1) END as "Human RT",
-        COALESCE(att.days_present, 0) as "Days Present",
-        COALESCE(att.total_scheduled_days, 0) as "Total Days"
-    FROM agent_daily_stats s
-    JOIN agents a ON s.agent_id = a.id
-    LEFT JOIN new_chats nc ON a.agent_name = nc.agent_name AND s.shift = nc.shift
-    LEFT JOIN unique_users uu ON a.agent_name = uu.agent_name AND s.shift = uu.shift
-    LEFT JOIN human_rt hrt ON a.agent_name = hrt.agent_name AND s.shift = hrt.shift
-    LEFT JOIN attendance att ON a.agent_name = att.agent_name AND s.shift = att.shift
-    WHERE s.date BETWEEN %s AND %s
-    GROUP BY a.agent_name, s.shift, s.schedule_status, s.duty_hours, nc.new_chats, uu.unique_users, hrt.human_response_time, att.days_present, att.total_scheduled_days
-    ORDER BY
-        CASE s.shift
-            WHEN 'Morning' THEN 1
-            WHEN 'Mid' THEN 2
-            ELSE 3
-        END,
-        a.agent_name
-""", (from_date, to_date, from_date, to_date, from_date, to_date, from_date, to_date, from_date, to_date, from_date, to_date))
+        LEFT JOIN new_chats nc ON a.agent_name = nc.agent_name AND s.shift = nc.shift
+        LEFT JOIN unique_users uu ON a.agent_name = uu.agent_name AND s.shift = uu.shift
+        LEFT JOIN human_rt hrt ON a.agent_name = hrt.agent_name AND s.shift = hrt.shift
+        WHERE s.date = %s
+        ORDER BY
+            CASE s.shift
+                WHEN 'Morning' THEN 1
+                WHEN 'Mid' THEN 2
+                ELSE 3
+            END,
+            a.agent_name
+    """, (from_date, to_date, from_date, to_date, from_date, to_date, from_date, to_date, from_date))
 sma_data = cur.fetchall()
 
 if sma_data:
-    sma_df = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments Sent', 'Response %', 'Avg RT', 'Human RT', 'Days Present', 'Total Days'])
+    sma_df = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments Sent', 'Opening', 'Closing', 'Response %', 'Avg RT', 'Human RT', 'Days Present', 'Total Days'])
+
+    # Show aggregation info for date ranges
+    if total_days_in_range > 1:
+        st.info(f"📊 **Aggregated Data** - Showing totals for {total_days_in_range} days ({from_date.strftime('%b %d')} - {to_date.strftime('%b %d')}). One row per agent with combined metrics.")
 
     # style_status is imported from utils module
     sma_display = sma_df.copy()
-    for col in ['New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments Sent', 'Days Present', 'Total Days']:
+    for col in ['New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments Sent', 'Opening', 'Closing', 'Days Present', 'Total Days']:
         sma_display[col] = sma_display[col].apply(format_number)
     sma_display['Response %'] = sma_display['Response %'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
     sma_display['Avg RT'] = sma_df['Avg RT'].apply(format_rt)
@@ -431,6 +538,8 @@ if sma_data:
             st.markdown(f"📥 Msg Recv: **{present_df['Msg Recv'].sum():,}**")
             st.markdown(f"📤 Msg Sent: **{present_df['Msg Sent'].sum():,}**")
             st.markdown(f"💬 Comments Sent: **{present_df['Comments Sent'].sum():,}**")
+            st.markdown(f"👋 Opening: **{int(present_df['Opening'].sum()):,}**")
+            st.markdown(f"🙏 Closing: **{int(present_df['Closing'].sum()):,}**")
             # Calculate average response times for present agents
             avg_rt_mean = present_df['Avg RT'].dropna().mean()
             human_rt_mean = present_df['Human RT'].dropna().mean()
@@ -446,12 +555,19 @@ if sma_data:
         |--------|-------------|
         | **New Chats** | First-time users who started a conversation (never messaged before) |
         | **Unique Users** | All distinct users who messaged (including returning users) |
+        | **Hours** | Total duty hours (single day) or sum of hours worked (date range) |
+        | **Opening** | Count of agent's opening spiel messages (fuzzy matched, 70% threshold) |
+        | **Closing** | Count of agent's closing spiel messages (fuzzy matched, 70% threshold) |
         | **Avg RT** | Average Response Time - overall average time to respond to messages (includes automated) |
         | **Human RT** | Human Response Time - average response time from conversation sessions (excludes instant/automated) |
         | **Days Present** | Number of days the agent was marked as "present" in the date range |
         | **Total Days** | Total scheduled days for the agent in the date range |
 
-        **Note:** When status is "off", all metrics show 0 since the agent was not working.
+        **Single Day Mode:** Shows individual agent status (present/absent/off) for that specific day.
+
+        **Date Range Mode:** Aggregates all data into one row per agent. Status shows "present" if agent worked at least 1 day, metrics are summed/averaged across all present days.
+
+        **Spiel Tracking:** Opening/Closing counts track usage of each agent's unique spiels (started Jan 19, 2026).
         """)
 else:
     st.info("No SMA schedule data for selected date. Schedule may not be synced yet.")
@@ -717,7 +833,7 @@ csv_buffer.write("\n")
 
 if sma_data:
     csv_buffer.write("SMA MEMBER PERFORMANCE\n")
-    sma_export = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments Sent', 'Response %', 'Avg RT (s)', 'Human RT (s)', 'Days Present', 'Total Days'])
+    sma_export = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments Sent', 'Opening', 'Closing', 'Response %', 'Avg RT (s)', 'Human RT (s)', 'Days Present', 'Total Days'])
     sma_export.to_csv(csv_buffer, index=False)
     csv_buffer.write("\n")
 
@@ -822,15 +938,17 @@ def generate_html_report():
         html += """
     <h2>👥 SMA Member Performance</h2>
     <table>
-        <tr><th>Agent</th><th>Shift</th><th>Status</th><th>Hours</th><th>New Chats</th><th>Unique Users</th><th>Msg Recv</th><th>Msg Sent</th><th>Comments Sent</th><th>Response %</th><th>Avg RT</th><th>Human RT</th><th>Days</th></tr>
+        <tr><th>Agent</th><th>Shift</th><th>Status</th><th>Hours</th><th>New Chats</th><th>Unique Users</th><th>Msg Recv</th><th>Msg Sent</th><th>Comments</th><th>Opening</th><th>Closing</th><th>Resp %</th><th>Avg RT</th><th>Human RT</th><th>Days</th></tr>
 """
         for row in sma_data:
             status_style = 'background:#d1fae5' if row[2]=='present' else 'background:#fee2e2' if row[2]=='absent' else 'background:#f3f4f6'
-            resp_pct = f"{row[9]:.1f}%" if row[9] else "N/A"
-            avg_rt = format_rt(row[10]) if row[10] else "-"
-            human_rt = format_rt(row[11]) if row[11] else "-"
-            days_display = f"{row[12]}/{row[13]}" if row[12] is not None and row[13] is not None else "-"
-            html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td style='{status_style}'>{row[2]}</td><td>{row[3] or '-'}</td><td>{row[4]:,}</td><td>{row[5]:,}</td><td>{row[6]:,}</td><td>{row[7]:,}</td><td>{row[8]:,}</td><td>{resp_pct}</td><td>{avg_rt}</td><td>{human_rt}</td><td>{days_display}</td></tr>\n"
+            resp_pct = f"{row[11]:.1f}%" if row[11] else "N/A"
+            avg_rt = format_rt(row[12]) if row[12] else "-"
+            human_rt = format_rt(row[13]) if row[13] else "-"
+            days_display = f"{row[14]}/{row[15]}" if row[14] is not None and row[15] is not None else "-"
+            opening = int(row[9]) if row[9] else 0
+            closing = int(row[10]) if row[10] else 0
+            html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td style='{status_style}'>{row[2]}</td><td>{row[3] or '-'}</td><td>{row[4]:,}</td><td>{row[5]:,}</td><td>{row[6]:,}</td><td>{row[7]:,}</td><td>{row[8]:,}</td><td>{opening}</td><td>{closing}</td><td>{resp_pct}</td><td>{avg_rt}</td><td>{human_rt}</td><td>{days_display}</td></tr>\n"
         html += "    </table>\n"
 
     # Add SMA Performance by Page table

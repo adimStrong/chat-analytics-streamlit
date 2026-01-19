@@ -213,6 +213,15 @@ SPILL_KEYWORDS = [
 ]
 
 # ============================================
+# AGENT SPIEL TRACKING
+# ============================================
+# Spiels tracking start date - only count spiels from this date forward
+SPIELS_START_DATE = "2026-01-16"
+
+# Similarity threshold for fuzzy matching (70%)
+SPIEL_SIMILARITY_THRESHOLD = 0.70
+
+# ============================================
 # QA SCORING WEIGHTS (Industry Standard)
 # ============================================
 QA_WEIGHTS = {

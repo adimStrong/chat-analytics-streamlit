@@ -18,11 +18,15 @@ logger = logging.getLogger(__name__)
 try:
     import psycopg2
     from dotenv import load_dotenv
+    from spiel_matcher import count_spiels, get_key_phrases, AGENT_SPIELS, get_supported_agents, normalize_agent_name, detect_spiel_owner, get_all_key_phrases
 except ImportError as e:
     logger.error(f"Missing required package: {e}")
     sys.exit(1)
 
 load_dotenv()
+
+# Spiels tracking start date - only count spiels from this date forward
+SPIELS_START_DATE = "2026-01-16"
 
 
 def get_db_connection():
@@ -39,6 +43,136 @@ def get_db_connection():
         return psycopg2.connect(db_url)
 
     raise ValueError("DATABASE_URL not found")
+
+
+def count_agent_spiels_as_owner(conn, agent_name: str, stat_date) -> tuple:
+    """
+    Count opening/closing spiels credited to an agent as spiel OWNER.
+    If agent A uses agent B's spiel, it counts for agent B.
+
+    Args:
+        conn: Database connection
+        agent_name: Name of the agent (will be normalized)
+        stat_date: Date to count spiels for
+
+    Returns:
+        Tuple of (opening_count, closing_count)
+    """
+    # Check if agent has spiels configured (using normalized name)
+    normalized_name = normalize_agent_name(agent_name)
+    if normalized_name not in AGENT_SPIELS:
+        return 0, 0
+
+    # Check if date is on or after spiels start date
+    spiels_start = datetime.strptime(SPIELS_START_DATE, '%Y-%m-%d').date()
+    if stat_date < spiels_start:
+        return 0, 0
+
+    cur = conn.cursor()
+
+    # Get ALL key phrases across all agents for SQL pre-filtering
+    all_opening_phrases = get_all_key_phrases("opening")
+    all_closing_phrases = get_all_key_phrases("closing")
+
+    # Build SQL LIKE conditions for pre-filtering
+    phrase_conditions = []
+    for p in all_opening_phrases + all_closing_phrases:
+        escaped_phrase = p.replace("'", "''")
+        phrase_conditions.append(f"LOWER(m.message_text) LIKE '%%{escaped_phrase}%%'")
+
+    if not phrase_conditions:
+        cur.close()
+        return 0, 0
+
+    # Get ALL outgoing messages from core pages for this date
+    # (not filtered by agent's assigned pages - we want to count by spiel owner)
+    cur.execute(f"""
+        SELECT m.message_text FROM messages m
+        JOIN pages p ON m.page_id = p.page_id
+        WHERE m.is_from_page = true
+          AND (m.message_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Manila')::date = %s
+          AND p.page_name IN ('Juan365', 'JuanBingo', 'Juan365 Cares', 'Juan365 Live Stream',
+                              'Juan365 LiveStream', 'JuanSports', 'Juan365 Studios')
+          AND ({' OR '.join(phrase_conditions)})
+    """, (stat_date,))
+
+    messages = [row[0] for row in cur.fetchall() if row[0]]
+    cur.close()
+
+    # Count how many messages match THIS agent's spiels
+    opening_count = 0
+    closing_count = 0
+
+    for msg in messages:
+        # Check opening spiel - does it match this agent's spiel?
+        owner, score = detect_spiel_owner(msg, "opening")
+        if owner == normalized_name:
+            opening_count += 1
+
+        # Check closing spiel - does it match this agent's spiel?
+        owner, score = detect_spiel_owner(msg, "closing")
+        if owner == normalized_name:
+            closing_count += 1
+
+    return opening_count, closing_count
+
+
+def update_all_spiel_counts(conn, start_date: date, end_date: date) -> int:
+    """
+    Update spiel counts for ALL agents with spiel configs.
+    This ensures agents get credit even if they have no message activity.
+
+    Args:
+        conn: Database connection
+        start_date: Start date
+        end_date: End date
+
+    Returns:
+        Number of updates made
+    """
+    # Check if date range includes spiels start date
+    spiels_start = datetime.strptime(SPIELS_START_DATE, '%Y-%m-%d').date()
+    if end_date < spiels_start:
+        return 0
+
+    # Adjust start_date if before spiels start
+    effective_start = max(start_date, spiels_start)
+
+    cur = conn.cursor()
+    updates = 0
+
+    # Get all agents mapped to spiel config keys
+    cur.execute("SELECT id, agent_name FROM agents WHERE is_active = true")
+    all_agents = cur.fetchall()
+
+    # For each date in range
+    current_date = effective_start
+    while current_date <= end_date:
+        for agent_id, agent_name in all_agents:
+            normalized_name = normalize_agent_name(agent_name)
+
+            # Skip if agent has no spiel config
+            if normalized_name not in AGENT_SPIELS:
+                continue
+
+            # Calculate spiel counts as owner
+            opening_count, closing_count = count_agent_spiels_as_owner(conn, agent_name, current_date)
+
+            # Update existing record (don't insert - only update if record exists)
+            cur.execute("""
+                UPDATE agent_daily_stats
+                SET opening_spiels_count = %s, closing_spiels_count = %s
+                WHERE agent_id = %s AND date = %s
+            """, (opening_count, closing_count, agent_id, current_date))
+
+            if opening_count > 0 or closing_count > 0:
+                logger.info(f"    {agent_name}: spiels=({opening_count}/{closing_count}) on {current_date}")
+                updates += 1
+
+        current_date += timedelta(days=1)
+
+    conn.commit()
+    return updates
 
 
 def aggregate_daily_stats(start_date: date = None, end_date: date = None):
@@ -203,33 +337,52 @@ def aggregate_daily_stats(start_date: date = None, end_date: date = None):
                     """, (agent_id, stat_date))
                     logger.info(f"  {agent_name} on {stat_date}: {schedule_status} - set to 0")
                 else:
-                    # Update with actual stats
+                    # Count spiels for present agents
+                    opening_count, closing_count = count_agent_spiels_as_owner(conn, agent_name, stat_date)
+
+                    # Update with actual stats including spiels
                     cur.execute("""
                         UPDATE agent_daily_stats
                         SET messages_received = %s,
                             messages_sent = %s,
                             avg_response_time_seconds = %s,
-                            comment_replies = %s
+                            comment_replies = %s,
+                            opening_spiels_count = %s,
+                            closing_spiels_count = %s
                         WHERE agent_id = %s AND date = %s
-                    """, (msgs_recv, msgs_sent, avg_rt or 0, comment_replies, agent_id, stat_date))
-                    logger.info(f"  {agent_name} on {stat_date}: recv={msgs_recv}, sent={msgs_sent}, comments={comment_replies}")
+                    """, (msgs_recv, msgs_sent, avg_rt or 0, comment_replies, opening_count, closing_count, agent_id, stat_date))
+
+                    spiel_info = f", spiels=({opening_count}/{closing_count})" if opening_count or closing_count else ""
+                    logger.info(f"  {agent_name} on {stat_date}: recv={msgs_recv}, sent={msgs_sent}, comments={comment_replies}{spiel_info}")
                 updated += 1
             else:
+                # Count spiels for new record
+                opening_count, closing_count = count_agent_spiels_as_owner(conn, agent_name, stat_date)
+
                 # Insert new record (default to present if no schedule exists)
                 cur.execute("""
                     INSERT INTO agent_daily_stats
                     (agent_id, date, messages_received, messages_sent, avg_response_time_seconds,
-                     shift, schedule_status, duty_hours, comment_replies)
-                    VALUES (%s, %s, %s, %s, %s, 'Morning', 'present', 8.0, %s)
-                """, (agent_id, stat_date, msgs_recv, msgs_sent, avg_rt or 0, comment_replies))
+                     shift, schedule_status, duty_hours, comment_replies, opening_spiels_count, closing_spiels_count)
+                    VALUES (%s, %s, %s, %s, %s, 'Morning', 'present', 8.0, %s, %s, %s)
+                """, (agent_id, stat_date, msgs_recv, msgs_sent, avg_rt or 0, comment_replies, opening_count, closing_count))
                 inserted += 1
-                logger.info(f"  {agent_name} on {stat_date}: recv={msgs_recv}, sent={msgs_sent}, comments={comment_replies} (new)")
+
+                spiel_info = f", spiels=({opening_count}/{closing_count})" if opening_count or closing_count else ""
+                logger.info(f"  {agent_name} on {stat_date}: recv={msgs_recv}, sent={msgs_sent}, comments={comment_replies}{spiel_info} (new)")
 
         except Exception as e:
             logger.error(f"Error updating {agent_name} on {stat_date}: {e}")
             errors += 1
 
     conn.commit()
+
+    # Update spiel counts for ALL agents with spiel configs (regardless of message activity)
+    logger.info("")
+    logger.info("Updating spiel counts for all configured agents...")
+    spiel_updates = update_all_spiel_counts(conn, start_date, end_date)
+    logger.info(f"  Spiel updates: {spiel_updates}")
+
     cur.close()
     conn.close()
 
