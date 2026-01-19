@@ -105,12 +105,11 @@ def get_period_metrics(start_date, end_date, page_filter_sql):
     cur.close()
     conn.close()
 
+    # Keep msg_recv and msg_sent internally for response_rate calculation
     msg_recv = msg_row[0] or 0 if msg_row else 0
     msg_sent = msg_row[1] or 0 if msg_row else 0
 
     return {
-        'msg_recv': msg_recv,
-        'msg_sent': msg_sent,
         'unique_users': msg_row[2] or 0 if msg_row else 0,
         'new_chats': msg_row[3] or 0 if msg_row else 0,
         'cmt_recv': cmt_row[0] or 0 if cmt_row else 0,
@@ -433,18 +432,18 @@ st.caption(f"Comparing {selected_period} vs Previous {days} Days")
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    change = calculate_change(current_metrics['msg_recv'], previous_metrics['msg_recv'])
+    change = calculate_change(current_metrics['new_chats'], previous_metrics['new_chats'])
     st.metric(
-        "Messages Received",
-        f"{current_metrics['msg_recv']:,}",
+        "New Chats",
+        f"{current_metrics['new_chats']:,}",
         f"{change:+.1f}%"
     )
 
 with col2:
-    change = calculate_change(current_metrics['msg_sent'], previous_metrics['msg_sent'])
+    change = calculate_change(current_metrics['unique_users'], previous_metrics['unique_users'])
     st.metric(
-        "Messages Sent",
-        f"{current_metrics['msg_sent']:,}",
+        "Unique Users",
+        f"{current_metrics['unique_users']:,}",
         f"{change:+.1f}%"
     )
 
@@ -468,26 +467,10 @@ with col4:
         delta_color="inverse"  # Lower is better
     )
 
-# Second row of KPIs
+# Second row of KPIs - Comments
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    change = calculate_change(current_metrics['new_chats'], previous_metrics['new_chats'])
-    st.metric(
-        "New Chats",
-        f"{current_metrics['new_chats']:,}",
-        f"{change:+.1f}%"
-    )
-
-with col2:
-    change = calculate_change(current_metrics['unique_users'], previous_metrics['unique_users'])
-    st.metric(
-        "Unique Users",
-        f"{current_metrics['unique_users']:,}",
-        f"{change:+.1f}%"
-    )
-
-with col3:
     change = calculate_change(current_metrics['cmt_recv'], previous_metrics['cmt_recv'])
     st.metric(
         "Comments Received",
@@ -495,7 +478,7 @@ with col3:
         f"{change:+.1f}%"
     )
 
-with col4:
+with col2:
     change = calculate_change(current_metrics['cmt_reply'], previous_metrics['cmt_reply'])
     st.metric(
         "Comment Replies",

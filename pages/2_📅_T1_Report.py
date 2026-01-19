@@ -13,8 +13,9 @@ import io
 # Import shared modules
 from config import (
     CORE_PAGES, CORE_PAGES_SQL, TIMEZONE, CACHE_TTL, COLORS,
-    LIVESTREAM_PAGES_SQL, SOCMED_PAGES_SQL
+    LIVESTREAM_PAGES_SQL, SOCMED_PAGES_SQL, SPIELS_START_DATE
 )
+from datetime import datetime
 from db_utils import get_simple_connection as get_connection
 from utils import format_number, format_rt, style_status
 
@@ -225,44 +226,30 @@ st.subheader("📈 Daily Summary")
 if enable_comparison and prev_start_date:
     st.caption(f"Compared to {prev_start_date.strftime('%b %d')} - {prev_end_date.strftime('%b %d, %Y')}")
 
-col1, col2, col3, col4, col5, col6 = st.columns(6)
+col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    delta = None
-    if enable_comparison and prev_msg_recv > 0:
-        change = calc_change(msg_recv, prev_msg_recv)
-        delta = f"{change:+.1f}%" if change is not None else None
-    st.metric("📥 Messages Received", f"{msg_recv:,}", delta)
-
-with col2:
-    delta = None
-    if enable_comparison and prev_msg_sent > 0:
-        change = calc_change(msg_sent, prev_msg_sent)
-        delta = f"{change:+.1f}%" if change is not None else None
-    st.metric("📤 Messages Sent", f"{msg_sent:,}", delta)
-
-with col3:
     delta = None
     if enable_comparison and prev_unique_users > 0:
         change = calc_change(unique_users, prev_unique_users)
         delta = f"{change:+.1f}%" if change is not None else None
     st.metric("👥 Unique Users", f"{unique_users:,}", delta)
 
-with col4:
+with col2:
     delta = None
     if enable_comparison and prev_new_chats > 0:
         change = calc_change(new_chats, prev_new_chats)
         delta = f"{change:+.1f}%" if change is not None else None
     st.metric("🆕 New Chats", f"{new_chats:,}", delta)
 
-with col5:
+with col3:
     delta = None
     if enable_comparison and prev_response_rate > 0:
         change = calc_change(response_rate, prev_response_rate)
         delta = f"{change:+.1f}%" if change is not None else None
     st.metric("📊 Response Rate", f"{response_rate:.1f}%", delta)
 
-with col6:
+with col4:
     delta = None
     if enable_comparison and prev_cmt_reply > 0:
         change = calc_change(cmt_reply, prev_cmt_reply)
@@ -351,15 +338,16 @@ if total_days_in_range > 1:
             SELECT
                 a.agent_name,
                 s.shift,
-                SUM(s.messages_received) FILTER (WHERE s.schedule_status = 'present') as messages_received,
-                SUM(s.messages_sent) FILTER (WHERE s.schedule_status = 'present') as messages_sent,
                 SUM(s.comment_replies) FILTER (WHERE s.schedule_status = 'present') as comment_replies,
                 AVG(s.avg_response_time_seconds) FILTER (WHERE s.schedule_status = 'present' AND s.avg_response_time_seconds > 0) as avg_rt,
                 SUM(CASE WHEN s.duty_hours ~ '^[0-9.]+$' THEN CAST(s.duty_hours AS NUMERIC) ELSE 0 END) FILTER (WHERE s.schedule_status = 'present') as total_hours,
                 COUNT(*) FILTER (WHERE s.schedule_status = 'present') as days_present,
                 COUNT(*) as total_days,
                 COALESCE(SUM(s.opening_spiels_count) FILTER (WHERE s.schedule_status = 'present'), 0) as opening_spiels,
-                COALESCE(SUM(s.closing_spiels_count) FILTER (WHERE s.schedule_status = 'present'), 0) as closing_spiels
+                COALESCE(SUM(s.closing_spiels_count) FILTER (WHERE s.schedule_status = 'present'), 0) as closing_spiels,
+                -- Keep for response rate calculation (internal use only)
+                SUM(s.messages_received) FILTER (WHERE s.schedule_status = 'present') as messages_received_internal,
+                SUM(s.messages_sent) FILTER (WHERE s.schedule_status = 'present') as messages_sent_internal
             FROM agent_daily_stats s
             JOIN agents a ON s.agent_id = a.id
             WHERE s.date BETWEEN %s AND %s
@@ -372,13 +360,11 @@ if total_days_in_range > 1:
             asa.total_hours as "Hours",
             COALESCE(nc.new_chats, 0) as "New Chats",
             COALESCE(uu.unique_users, 0) as "Unique Users",
-            COALESCE(asa.messages_received, 0) as "Msg Recv",
-            COALESCE(asa.messages_sent, 0) as "Msg Sent",
             COALESCE(asa.comment_replies, 0) as "Comments Sent",
             asa.opening_spiels as "Opening",
             asa.closing_spiels as "Closing",
-            CASE WHEN COALESCE(asa.messages_received, 0) > 0
-                 THEN ROUND(100.0 * COALESCE(asa.messages_sent, 0) / asa.messages_received, 1)
+            CASE WHEN COALESCE(asa.messages_received_internal, 0) > 0
+                 THEN ROUND(100.0 * COALESCE(asa.messages_sent_internal, 0) / asa.messages_received_internal, 1)
                  ELSE 0 END as "Response %%",
             ROUND(asa.avg_rt::numeric, 1) as "Avg RT",
             ROUND(hrt.human_response_time::numeric, 1) as "Human RT",
@@ -468,8 +454,6 @@ else:
             s.duty_hours as "Hours",
             CASE WHEN s.schedule_status != 'present' THEN 0 ELSE COALESCE(nc.new_chats, 0) END as "New Chats",
             CASE WHEN s.schedule_status != 'present' THEN 0 ELSE COALESCE(uu.unique_users, 0) END as "Unique Users",
-            CASE WHEN s.schedule_status != 'present' THEN 0 ELSE s.messages_received END as "Msg Recv",
-            CASE WHEN s.schedule_status != 'present' THEN 0 ELSE s.messages_sent END as "Msg Sent",
             CASE WHEN s.schedule_status != 'present' THEN 0 ELSE s.comment_replies END as "Comments Sent",
             CASE WHEN s.schedule_status != 'present' THEN 0 ELSE COALESCE(s.opening_spiels_count, 0) END as "Opening",
             CASE WHEN s.schedule_status != 'present' THEN 0 ELSE COALESCE(s.closing_spiels_count, 0) END as "Closing",
@@ -497,16 +481,37 @@ else:
 sma_data = cur.fetchall()
 
 if sma_data:
-    sma_df = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments Sent', 'Opening', 'Closing', 'Response %', 'Avg RT', 'Human RT', 'Days Present', 'Total Days'])
+    sma_df = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Comments Sent', 'Opening', 'Closing', 'Response %', 'Avg RT', 'Human RT', 'Days Present', 'Total Days'])
 
     # Show aggregation info for date ranges
     if total_days_in_range > 1:
         st.info(f"📊 **Aggregated Data** - Showing totals for {total_days_in_range} days ({from_date.strftime('%b %d')} - {to_date.strftime('%b %d')}). One row per agent with combined metrics.")
 
+    # Parse SPIELS_START_DATE for comparison
+    spiels_start = datetime.strptime(SPIELS_START_DATE, "%Y-%m-%d").date()
+
+    # Handle N/A for spiel columns before the tracking start date
+    if from_date < spiels_start:
+        if to_date < spiels_start:
+            st.warning("⚠️ Spiel tracking started Jan 16, 2026. Opening/Closing columns show N/A for earlier dates.")
+        else:
+            st.info(f"ℹ️ Spiel data only available from Jan 16, 2026. Counts reflect {spiels_start} to {to_date} only.")
+
     # style_status is imported from utils module
     sma_display = sma_df.copy()
-    for col in ['New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments Sent', 'Opening', 'Closing', 'Days Present', 'Total Days']:
+
+    # Handle N/A for spiel columns if date is before SPIELS_START_DATE
+    if to_date < spiels_start:
+        sma_display['Opening'] = 'N/A'
+        sma_display['Closing'] = 'N/A'
+
+    for col in ['New Chats', 'Unique Users', 'Comments Sent', 'Days Present', 'Total Days']:
         sma_display[col] = sma_display[col].apply(format_number)
+
+    # Only format Opening/Closing as numbers if they're not already N/A
+    if to_date >= spiels_start:
+        for col in ['Opening', 'Closing']:
+            sma_display[col] = sma_display[col].apply(format_number)
     sma_display['Response %'] = sma_display['Response %'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
     sma_display['Avg RT'] = sma_df['Avg RT'].apply(format_rt)
     sma_display['Human RT'] = sma_df['Human RT'].apply(format_rt)
@@ -535,11 +540,14 @@ if sma_data:
             st.markdown("**📈 Present Agents Total:**")
             st.markdown(f"🆕 New Chats: **{present_df['New Chats'].sum():,}**")
             st.markdown(f"👥 Unique Users: **{present_df['Unique Users'].sum():,}**")
-            st.markdown(f"📥 Msg Recv: **{present_df['Msg Recv'].sum():,}**")
-            st.markdown(f"📤 Msg Sent: **{present_df['Msg Sent'].sum():,}**")
             st.markdown(f"💬 Comments Sent: **{present_df['Comments Sent'].sum():,}**")
-            st.markdown(f"👋 Opening: **{int(present_df['Opening'].sum()):,}**")
-            st.markdown(f"🙏 Closing: **{int(present_df['Closing'].sum()):,}**")
+            # Show Opening/Closing only if date is on or after spiels start
+            if to_date >= spiels_start:
+                st.markdown(f"👋 Opening: **{int(present_df['Opening'].sum()):,}**")
+                st.markdown(f"🙏 Closing: **{int(present_df['Closing'].sum()):,}**")
+            else:
+                st.markdown(f"👋 Opening: **N/A**")
+                st.markdown(f"🙏 Closing: **N/A**")
             # Calculate average response times for present agents
             avg_rt_mean = present_df['Avg RT'].dropna().mean()
             human_rt_mean = present_df['Human RT'].dropna().mean()
@@ -556,8 +564,10 @@ if sma_data:
         | **New Chats** | First-time users who started a conversation (never messaged before) |
         | **Unique Users** | All distinct users who messaged (including returning users) |
         | **Hours** | Total duty hours (single day) or sum of hours worked (date range) |
+        | **Comments Sent** | Number of comment replies sent by the agent |
         | **Opening** | Count of agent's opening spiel messages (fuzzy matched, 70% threshold) |
         | **Closing** | Count of agent's closing spiel messages (fuzzy matched, 70% threshold) |
+        | **Response %** | Response rate calculated from messages sent vs received |
         | **Avg RT** | Average Response Time - overall average time to respond to messages (includes automated) |
         | **Human RT** | Human Response Time - average response time from conversation sessions (excludes instant/automated) |
         | **Days Present** | Number of days the agent was marked as "present" in the date range |
@@ -567,7 +577,7 @@ if sma_data:
 
         **Date Range Mode:** Aggregates all data into one row per agent. Status shows "present" if agent worked at least 1 day, metrics are summed/averaged across all present days.
 
-        **Spiel Tracking:** Opening/Closing counts track usage of each agent's unique spiels (started Jan 19, 2026).
+        **Spiel Tracking:** Opening/Closing counts track usage of each agent's unique spiels (started Jan 16, 2026). Dates before this show "N/A".
         """)
 else:
     st.info("No SMA schedule data for selected date. Schedule may not be synced yet.")
@@ -819,8 +829,8 @@ else:
 # EXPORT FUNCTIONALITY (in sidebar)
 # ============================================
 export_data = {
-    'Metric': ['Messages Received', 'Messages Sent', 'Unique Users', 'New Chats', 'Response Rate', 'Page Comments'],
-    'Value': [msg_recv, msg_sent, unique_users, new_chats, f"{response_rate:.1f}%", cmt_reply]
+    'Metric': ['Unique Users', 'New Chats', 'Response Rate', 'Page Comments'],
+    'Value': [unique_users, new_chats, f"{response_rate:.1f}%", cmt_reply]
 }
 export_df = pd.DataFrame(export_data)
 
@@ -833,7 +843,7 @@ csv_buffer.write("\n")
 
 if sma_data:
     csv_buffer.write("SMA MEMBER PERFORMANCE\n")
-    sma_export = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Msg Recv', 'Msg Sent', 'Comments Sent', 'Opening', 'Closing', 'Response %', 'Avg RT (s)', 'Human RT (s)', 'Days Present', 'Total Days'])
+    sma_export = pd.DataFrame(sma_data, columns=['Agent', 'Shift', 'Status', 'Hours', 'New Chats', 'Unique Users', 'Comments Sent', 'Opening', 'Closing', 'Response %', 'Avg RT (s)', 'Human RT (s)', 'Days Present', 'Total Days'])
     sma_export.to_csv(csv_buffer, index=False)
     csv_buffer.write("\n")
 
@@ -867,7 +877,7 @@ def generate_html_report():
         .header img {{ width: 60px; height: 60px; border-radius: 8px; }}
         .header h1 {{ color: white; border: none; margin: 0; }}
         .header-text {{ flex: 1; }}
-        .summary-grid {{ display: grid; grid-template-columns: repeat(6, 1fr); gap: 15px; margin: 20px 0; }}
+        .summary-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin: 20px 0; }}
         .metric-card {{ background: #f3f4f6; padding: 15px; border-radius: 8px; text-align: center; }}
         .metric-value {{ font-size: 24px; font-weight: bold; color: #1f2937; }}
         .metric-label {{ font-size: 12px; color: #6b7280; margin-top: 5px; }}
@@ -907,14 +917,6 @@ def generate_html_report():
     <h2>📈 Daily Summary</h2>
     <div class="summary-grid">
         <div class="metric-card">
-            <div class="metric-value">{msg_recv:,}</div>
-            <div class="metric-label">📥 Messages Received</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-value">{msg_sent:,}</div>
-            <div class="metric-label">📤 Messages Sent</div>
-        </div>
-        <div class="metric-card">
             <div class="metric-value">{unique_users:,}</div>
             <div class="metric-label">👥 Unique Users</div>
         </div>
@@ -938,17 +940,17 @@ def generate_html_report():
         html += """
     <h2>👥 SMA Member Performance</h2>
     <table>
-        <tr><th>Agent</th><th>Shift</th><th>Status</th><th>Hours</th><th>New Chats</th><th>Unique Users</th><th>Msg Recv</th><th>Msg Sent</th><th>Comments</th><th>Opening</th><th>Closing</th><th>Resp %</th><th>Avg RT</th><th>Human RT</th><th>Days</th></tr>
+        <tr><th>Agent</th><th>Shift</th><th>Status</th><th>Hours</th><th>New Chats</th><th>Unique Users</th><th>Comments</th><th>Opening</th><th>Closing</th><th>Resp %</th><th>Avg RT</th><th>Human RT</th><th>Days</th></tr>
 """
         for row in sma_data:
             status_style = 'background:#d1fae5' if row[2]=='present' else 'background:#fee2e2' if row[2]=='absent' else 'background:#f3f4f6'
-            resp_pct = f"{row[11]:.1f}%" if row[11] else "N/A"
-            avg_rt = format_rt(row[12]) if row[12] else "-"
-            human_rt = format_rt(row[13]) if row[13] else "-"
-            days_display = f"{row[14]}/{row[15]}" if row[14] is not None and row[15] is not None else "-"
-            opening = int(row[9]) if row[9] else 0
-            closing = int(row[10]) if row[10] else 0
-            html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td style='{status_style}'>{row[2]}</td><td>{row[3] or '-'}</td><td>{row[4]:,}</td><td>{row[5]:,}</td><td>{row[6]:,}</td><td>{row[7]:,}</td><td>{row[8]:,}</td><td>{opening}</td><td>{closing}</td><td>{resp_pct}</td><td>{avg_rt}</td><td>{human_rt}</td><td>{days_display}</td></tr>\n"
+            resp_pct = f"{row[9]:.1f}%" if row[9] else "N/A"
+            avg_rt = format_rt(row[10]) if row[10] else "-"
+            human_rt = format_rt(row[11]) if row[11] else "-"
+            days_display = f"{row[12]}/{row[13]}" if row[12] is not None and row[13] is not None else "-"
+            opening = int(row[7]) if row[7] else 0
+            closing = int(row[8]) if row[8] else 0
+            html += f"        <tr><td>{row[0]}</td><td>{row[1]}</td><td style='{status_style}'>{row[2]}</td><td>{row[3] or '-'}</td><td>{row[4]:,}</td><td>{row[5]:,}</td><td>{row[6]:,}</td><td>{opening}</td><td>{closing}</td><td>{resp_pct}</td><td>{avg_rt}</td><td>{human_rt}</td><td>{days_display}</td></tr>\n"
         html += "    </table>\n"
 
     # Add SMA Performance by Page table
@@ -1055,12 +1057,11 @@ cur.close()
 st.markdown("---")
 st.caption("""
 **Metric Definitions:**
-- **Messages Received**: Incoming messages from users
-- **Messages Sent**: Outgoing replies from page
 - **Unique Users**: Distinct users who sent messages (including returning)
 - **New Chats**: First-time users (never messaged before)
 - **Page Comments**: Comments posted by the page (replies to users)
-- **Response Rate**: Messages Sent / Messages Received x 100%
+- **Response Rate**: Percentage of incoming messages that received a reply
+- **Opening/Closing**: Agent spiel usage counts (available from Jan 16, 2026)
 """)
 st.caption("All times in Philippine Time (UTC+8) | Data from Facebook Graph API")
 
