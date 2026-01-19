@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from spiel_matcher import (
     AGENT_SPIELS, detect_spiel_owner, normalize_agent_name,
-    get_supported_agents, clean_text, get_similarity
+    get_supported_agents, clean_text, get_similarity, get_page_category
 )
 from config import SPIELS_START_DATE, CORE_PAGES
 
@@ -160,8 +160,8 @@ def get_conversation_spiel_review(start_date, end_date=None):
 
         conv = conversations[conv_id]
 
-        # Check for opening spiel
-        opening_owner, opening_score = detect_spiel_owner(msg_text, "opening")
+        # Check for opening spiel (pass page_name for MAIN vs BINGO detection)
+        opening_owner, opening_score = detect_spiel_owner(msg_text, "opening", page_name)
         if opening_owner and opening_score >= 0.70:
             # New opening resets the conversation tracking
             conv['has_opening'] = True
@@ -177,8 +177,8 @@ def get_conversation_spiel_review(start_date, end_date=None):
                 'is_from_page': True
             })
 
-        # Check for closing spiel
-        closing_owner, closing_score = detect_spiel_owner(msg_text, "closing")
+        # Check for closing spiel (pass page_name for MAIN vs BINGO detection)
+        closing_owner, closing_score = detect_spiel_owner(msg_text, "closing", page_name)
         if closing_owner and closing_score >= 0.70:
             conv['messages'].append({
                 'time': msg_time,
@@ -387,8 +387,8 @@ def get_live_spiel_detection(stat_date):
         if not msg_text:
             continue
 
-        # Check opening
-        opening_owner, opening_score = detect_spiel_owner(msg_text, "opening")
+        # Check opening (pass page_name for MAIN vs BINGO detection)
+        opening_owner, opening_score = detect_spiel_owner(msg_text, "opening", page_name)
         if opening_owner:
             results.append({
                 'message': msg_text[:100] + '...' if len(msg_text) > 100 else msg_text,
@@ -398,8 +398,8 @@ def get_live_spiel_detection(stat_date):
                 'match_score': f"{opening_score:.1%}"
             })
 
-        # Check closing
-        closing_owner, closing_score = detect_spiel_owner(msg_text, "closing")
+        # Check closing (pass page_name for MAIN vs BINGO detection)
+        closing_owner, closing_score = detect_spiel_owner(msg_text, "closing", page_name)
         if closing_owner:
             results.append({
                 'message': msg_text[:100] + '...' if len(msg_text) > 100 else msg_text,
@@ -883,25 +883,51 @@ def main():
     # Spiel reference
     st.subheader("📋 Spiel Reference")
 
-    with st.expander("View All Agent Spiels", expanded=False):
-        spiel_data = []
-        for agent, config in AGENT_SPIELS.items():
-            spiel_data.append({
-                'Agent': agent,
-                'Opening Spiel': config.get('opening', ('', []))[0],
-                'Closing Spiel': config.get('closing', ('', []))[0]
-            })
+    with st.expander("View All Agent Spiels (MAIN & BINGO)", expanded=False):
+        # Show tabs for MAIN and BINGO
+        main_tab, bingo_tab = st.tabs(["🏠 MAIN (Cares/Careers/Live)", "🎯 BINGO (JuanBingo/Sports)"])
 
-        st.dataframe(
-            pd.DataFrame(spiel_data),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                'Agent': st.column_config.TextColumn('Agent', width='small'),
-                'Opening Spiel': st.column_config.TextColumn('Opening Spiel', width='large'),
-                'Closing Spiel': st.column_config.TextColumn('Closing Spiel', width='large')
-            }
-        )
+        with main_tab:
+            spiel_data_main = []
+            for agent, categories in AGENT_SPIELS.items():
+                main_config = categories.get('MAIN', {})
+                spiel_data_main.append({
+                    'Agent': agent,
+                    'Opening Spiel': main_config.get('opening', ('', []))[0],
+                    'Closing Spiel': main_config.get('closing', ('', []))[0]
+                })
+
+            st.dataframe(
+                pd.DataFrame(spiel_data_main),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    'Agent': st.column_config.TextColumn('Agent', width='small'),
+                    'Opening Spiel': st.column_config.TextColumn('Opening Spiel', width='large'),
+                    'Closing Spiel': st.column_config.TextColumn('Closing Spiel', width='large')
+                }
+            )
+
+        with bingo_tab:
+            spiel_data_bingo = []
+            for agent, categories in AGENT_SPIELS.items():
+                bingo_config = categories.get('BINGO', {})
+                spiel_data_bingo.append({
+                    'Agent': agent,
+                    'Opening Spiel': bingo_config.get('opening', ('', []))[0],
+                    'Closing Spiel': bingo_config.get('closing', ('', []))[0]
+                })
+
+            st.dataframe(
+                pd.DataFrame(spiel_data_bingo),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    'Agent': st.column_config.TextColumn('Agent', width='small'),
+                    'Opening Spiel': st.column_config.TextColumn('Opening Spiel', width='large'),
+                    'Closing Spiel': st.column_config.TextColumn('Closing Spiel', width='large')
+                }
+            )
 
     # Trend section
     st.divider()
