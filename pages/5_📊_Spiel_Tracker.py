@@ -677,15 +677,31 @@ def main():
             if chat_filter == "All Chats":
                 # Get ALL conversations (with or without spiels)
                 conv_ids = list(all_convs.keys())
-                st.info(f"📂 Loading ALL {len(conv_ids)} conversations (max 500)")
             elif chat_filter == "Without Spiels":
                 # Only conversations WITHOUT spiels
                 conv_ids = list(convs_without_spiels)
-                st.info(f"📂 Loading {len(conv_ids)} conversations WITHOUT spiels")
             else:
                 # Only conversations with spiels
                 conv_ids = list(conversations.keys())
-                st.info(f"📂 Loading {len(conv_ids)} conversations WITH spiels")
+
+            # Apply Owner filter in Full Conversation mode
+            if filter_owner != "All":
+                # Filter to only conversations where opening_owner or closing_owner matches
+                filtered_conv_ids = []
+                for conv_id in conv_ids:
+                    spiel_info = conversations.get(conv_id, {})
+                    if spiel_info.get('opening_owner') == filter_owner or spiel_info.get('closing_owner') == filter_owner:
+                        filtered_conv_ids.append(conv_id)
+                conv_ids = filtered_conv_ids
+                st.info(f"📂 Showing {len(conv_ids)} conversations owned by **{filter_owner}**")
+            else:
+                # Show count based on chat_filter
+                if chat_filter == "All Chats":
+                    st.info(f"📂 Loading ALL {len(conv_ids)} conversations (max 500)")
+                elif chat_filter == "Without Spiels":
+                    st.info(f"📂 Loading {len(conv_ids)} conversations WITHOUT spiels")
+                else:
+                    st.info(f"📂 Loading {len(conv_ids)} conversations WITH spiels")
 
             if conv_ids:
                 full_history = get_full_conversation_history(conv_ids, start_date, end_date)
