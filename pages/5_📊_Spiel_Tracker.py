@@ -26,9 +26,8 @@ st.set_page_config(
 
 def get_meta_inbox_url(page_id: str, conversation_id: str) -> str:
     """Generate Meta Business Suite inbox URL for a conversation."""
-    # Remove 't_' prefix if present for the thread_id parameter
-    thread_id = conversation_id.replace('t_', '') if conversation_id.startswith('t_') else conversation_id
-    return f"https://business.facebook.com/latest/inbox/all?asset_id={page_id}&selected_item_id={thread_id}"
+    # Use Facebook Messenger direct link format
+    return f"https://www.facebook.com/messages/t/{conversation_id}"
 
 
 def get_db_connection():
